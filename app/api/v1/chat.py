@@ -2,7 +2,11 @@
 Chat Completions API 路由
 """
 
-from typing import Any, Dict, List, Optional, Union
+import asyncio
+import time
+import queue
+import threading
+from typing import Any, Dict, List, Optional, Union, AsyncGenerator
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -11,9 +15,70 @@ from pydantic import BaseModel, Field, field_validator
 from app.services.grok.services.chat import ChatService
 from app.services.grok.models.model import ModelService
 from app.core.exceptions import ValidationException
+from app.core.logger import logger
 
 
 router = APIRouter(tags=["Chat"])
+
+
+async def stream_with_heartbeat(
+    source_stream: AsyncGenerator[str, None],
+    interval: int = 30
+) -> AsyncGenerator[bytes, None]:
+    """
+    为流式响应添加主动心跳机制，防止长时间传输时连接超时
+
+    当数据流超过指定间隔没有新数据时，自动发送 SSE 注释格式的心跳包
+
+    Args:
+        source_stream: 原始异步生成器
+        interval: 心跳间隔（秒），默认 30 秒
+
+    Yields:
+        包含心跳的字节流
+
+    参考：kbtit25/grok2api 的主动心跳实现
+    """
+    # 立即发送初始心跳（SSE 注释格式 + 2KB 填充，绕过某些代理的缓冲）
+    yield (": " + (" " * 2048) + "\n").encode('utf-8')
+
+    last_heartbeat = time.monotonic()
+    stream_iterator = source_stream.__aiter__()
+
+    while True:
+        try:
+            # 计算距离上次心跳的剩余时间
+            elapsed = time.monotonic() - last_heartbeat
+            timeout = max(0.1, interval - elapsed)
+
+            # 等待下一个数据块，设置超时以便发送心跳
+            chunk = await asyncio.wait_for(
+                stream_iterator.__anext__(),
+                timeout=timeout
+            )
+
+            # 收到数据，发送给客户端
+            yield chunk.encode('utf-8') if isinstance(chunk, str) else chunk
+            last_heartbeat = time.monotonic()
+
+        except asyncio.TimeoutError:
+            # 超时无数据，发送心跳保持连接
+            yield b": ping\n\n"
+            last_heartbeat = time.monotonic()
+            logger.debug(f"发送心跳包（距上次 {elapsed:.1f}s）")
+
+        except StopAsyncIteration:
+            # 流结束
+            logger.debug("流式传输正常结束")
+            break
+
+        except asyncio.CancelledError:
+            logger.debug("流式传输被客户端取消")
+            raise
+
+        except Exception as e:
+            logger.error(f"流式传输错误: {e}")
+            raise
 
 
 VALID_ROLES = ["developer", "system", "user", "assistant", "tool"]
@@ -111,6 +176,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[MessageItem] = Field(..., description="消息数组")
     stream: Optional[bool] = Field(None, description="是否流式输出")
     thinking: Optional[str] = Field(None, description="思考模式: enabled/disabled/None")
+    deepsearch: Optional[str] = Field(None, description="深度搜索预设: default/deeper/None")
 
     # 视频生成配置
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
@@ -281,15 +347,20 @@ async def chat_completions(request: ChatCompletionRequest):
             messages=[msg.model_dump() for msg in request.messages],
             stream=request.stream,
             thinking=request.thinking,
+            deepsearch=request.deepsearch,
         )
 
     if isinstance(result, dict):
         return JSONResponse(content=result)
     else:
         return StreamingResponse(
-            result,
+            stream_with_heartbeat(result, interval=30),  # 添加主动心跳包装
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # 禁止 Nginx 缓冲流式响应
+            },
         )
 
 

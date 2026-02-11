@@ -36,10 +36,23 @@ class ChatRequest:
     messages: List[Dict[str, Any]]
     stream: bool = None
     think: bool = None
+    deepsearch_preset: str = None
 
 
 class MessageExtractor:
     """消息内容提取器"""
+
+    @staticmethod
+    def remove_think_tags(text: str) -> str:
+        """从文本中移除 <think> 标签和 base64 图片，避免污染上下文"""
+        if not text or not isinstance(text, str):
+            return text
+        import re
+        # 移除 <think> 标签及其内容
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+        # 将 base64 图片替换为占位符
+        text = re.sub(r'!\[image\]\(data:.*?base64,.*?\)', '[图片]', text)
+        return text
 
     @staticmethod
     def extract(
@@ -57,14 +70,16 @@ class MessageExtractor:
 
             if isinstance(content, str):
                 if content.strip():
-                    parts.append(content)
+                    # 移除 thinking 标签
+                    parts.append(MessageExtractor.remove_think_tags(content))
             elif isinstance(content, list):
                 for item in content:
                     item_type = item.get("type", "")
 
                     if item_type == "text":
                         if text := item.get("text", "").strip():
-                            parts.append(text)
+                            # 移除 thinking 标签
+                            parts.append(MessageExtractor.remove_think_tags(text))
 
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
@@ -161,6 +176,7 @@ class ChatRequestBuilder:
         mode: str = None,
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
+        deepsearch_preset: str = None,
     ) -> Dict[str, Any]:
         """构造请求体"""
         merged_attachments = []
@@ -176,6 +192,7 @@ class ChatRequestBuilder:
             "fileAttachments": merged_attachments,
             "imageAttachments": [],
             "disableSearch": False,
+            "deepsearchPreset": deepsearch_preset if deepsearch_preset else "",
             "enableImageGeneration": True,
             "returnImageBytes": False,
             "enableImageStreaming": True,
@@ -221,6 +238,7 @@ class GrokChatService:
         file_attachments: List[str] = None,
         image_attachments: List[str] = None,
         raw_payload: Dict[str, Any] = None,
+        deepsearch_preset: str = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -231,7 +249,7 @@ class GrokChatService:
             raw_payload
             if raw_payload is not None
             else ChatRequestBuilder.build_payload(
-                message, model, mode, file_attachments, image_attachments
+                message, model, mode, file_attachments, image_attachments, deepsearch_preset
             )
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
@@ -367,6 +385,7 @@ class GrokChatService:
             stream,
             file_attachments=file_ids,
             image_attachments=[],
+            deepsearch_preset=request.deepsearch_preset,
         )
 
         return response, stream, request.model
@@ -381,6 +400,7 @@ class ChatService:
         messages: List[Dict[str, Any]],
         stream: bool = None,
         thinking: str = None,
+        deepsearch: str = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -407,7 +427,7 @@ class ChatService:
 
         # 构造请求
         chat_request = ChatRequest(
-            model=model, messages=messages, stream=is_stream, think=think
+            model=model, messages=messages, stream=is_stream, think=think, deepsearch_preset=deepsearch
         )
 
         # 请求 Grok

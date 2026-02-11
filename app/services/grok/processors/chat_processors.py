@@ -5,7 +5,8 @@
 import asyncio
 import uuid
 import re
-from typing import Any, AsyncGenerator, AsyncIterable
+import threading
+from typing import Any, AsyncGenerator, AsyncIterable, Dict, Optional
 
 import orjson
 from curl_cffi.requests.errors import RequestsError
@@ -21,6 +22,93 @@ from .base import (
     _collect_image_urls,
     _is_http2_stream_error,
 )
+
+# Agent 模型列表（需要特殊处理 thinking 的模型）
+AGENT_MODELS = [
+    'grok-4-heavy',
+    'grok-4',
+    'grok-4-mini-thinking-tahoe',
+    'grok-3-deepsearch',
+    'grok-3-deepersearch',
+    'grok-3-reasoning'
+]
+
+# Thinking 相关的消息标签
+THINKING_TAGS = {
+    'header',
+    'summary',
+    'raw_function_result',
+    'citedWebSearchResults',
+    'tool_usage_card'
+}
+
+
+def process_model_response(response: Dict[str, Any], model: str, show_thinking: bool = None) -> Dict[str, Optional[str]]:
+    """
+    分类处理 Grok API 响应，区分 thinking 和 content
+
+    Args:
+        response: Grok API 响应数据
+        model: 模型名称
+        show_thinking: 是否显示 thinking 内容（None 则使用全局配置）
+
+    Returns:
+        {"token": 内容, "type": "thinking"/"content"/"heartbeat"/None}
+    """
+    result = {"token": None, "type": None}
+
+    # 忽略缓存的图像生成响应
+    if response.get("cachedImageGenerationResponse"):
+        return result
+
+    message_tag = response.get("messageTag")
+    token = response.get("token")
+
+    # 心跳消息
+    if message_tag == 'heartbeat':
+        result["type"] = 'heartbeat'
+        return result
+
+    # 对于非 Agent 模型，如果收到 modelResponse 就直接返回
+    if model not in AGENT_MODELS and response.get("modelResponse"):
+        return result
+
+    # 最终响应（包含完整消息）
+    if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
+        final_message = response["modelResponse"].get("message")
+        if final_message:
+            result["token"] = final_message
+            result["type"] = 'content'
+        return result
+
+    # 判断是否是 thinking 内容（仅对 Agent 模型）
+    is_thinking_content = False
+    if model in AGENT_MODELS:
+        if (message_tag in THINKING_TAGS or
+            response.get("isThinking") or
+            response.get("messageStepId")):
+            is_thinking_content = True
+
+    if is_thinking_content:
+        # 根据配置决定是否显示 thinking
+        if show_thinking is None:
+            show_thinking = get_config("chat.thinking")
+        if not show_thinking:
+            return result
+
+        # 返回 thinking 内容
+        if token:
+            result["token"] = token
+            result["type"] = 'thinking'
+        return result
+
+    # 普通 token
+    if token:
+        result["token"] = token
+        result["type"] = 'content'
+        return result
+
+    return result
 
 
 class StreamProcessor(BaseProcessor):
@@ -112,6 +200,10 @@ class StreamProcessor(BaseProcessor):
         }
         return f"data: {orjson.dumps(chunk).decode()}\n\n"
 
+    def _heartbeat_sse(self) -> str:
+        """构建 SSE 心跳响应（使用注释格式，客户端会忽略但保持连接）"""
+        return ": ping\n\n"
+
     async def process(
         self, response: AsyncIterable[bytes]
     ) -> AsyncGenerator[str, None]:
@@ -130,6 +222,11 @@ class StreamProcessor(BaseProcessor):
 
                 resp = data.get("result", {}).get("response", {})
 
+                # 使用 process_model_response 分类响应
+                classified = process_model_response(resp, self.model, self.show_think)
+                msg_type = classified.get("type")
+                token = classified.get("token")
+
                 if (llm := resp.get("llmInfo")) and not self.fingerprint:
                     self.fingerprint = llm.get("modelHash", "")
                 if rid := resp.get("responseId"):
@@ -138,6 +235,13 @@ class StreamProcessor(BaseProcessor):
                 if not self.role_sent:
                     yield self._sse(role="assistant")
                     self.role_sent = True
+
+                # 注意：Grok API 的心跳消息（msg_type=='heartbeat'）会被自动忽略
+                # 因为外层 stream_with_heartbeat() 已经提供主动心跳机制，无需转发
+                # 如果需要转发，取消注释以下代码：
+                # if msg_type == 'heartbeat':
+                #     yield self._sse("")  # 或自定义心跳格式
+                #     continue
 
                 # 图像生成进度
                 if img := resp.get("streamingImageGenerationResponse"):
@@ -194,8 +298,21 @@ class StreamProcessor(BaseProcessor):
                         self.fingerprint = meta["llm_info"]["modelHash"]
                     continue
 
-                # 普通 token
-                if (token := resp.get("token")) is not None:
+                # 处理 thinking 和 content
+                if msg_type == 'thinking':
+                    # Thinking 内容（已由分类器根据配置过滤）
+                    if not self.think_opened:
+                        yield self._sse("<think>\n")
+                        self.think_opened = True
+                    if token:
+                        filtered = self._filter_token(token)
+                        if filtered:
+                            yield self._sse(filtered)
+                elif msg_type == 'content':
+                    # 普通内容（关闭可能打开的 thinking 标签）
+                    if self.think_opened:
+                        yield self._sse("</think>\n")
+                        self.think_opened = False
                     if token:
                         filtered = self._filter_token(token)
                         if filtered:
