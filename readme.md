@@ -132,6 +132,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages`            | array   | 消息列表                       | 见下方消息格式                                |
 | `stream`              | boolean | 是否开启流式输出               | `true`, `false`                           |
 | `thinking`            | string  | 思维链模式                     | `enabled`, `disabled`, `null`           |
+| `deepsearch`          | string  | 深度搜索预设<br>- `default`: 标准深度搜索<br>- `deeper`: 更深度搜索（更多推理步骤）<br>- `null`: 不启用 | `default`, `deeper`, `null`             |
 | `video_config`        | object  | **视频模型专用配置对象** | -                                             |
 | └─`aspect_ratio`    | string  | 视频宽高比                     | `16:9`, `9:16`, `1:1`, `2:3`, `3:2` |
 | └─`video_length`    | integer | 视频时长 (秒)                  | `6`, `10`, `15`                         |
