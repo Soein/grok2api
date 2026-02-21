@@ -141,6 +141,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | array | 消息列表 | 见下方消息格式 |
 | `stream` | boolean | 是否开启流式输出 | `true`, `false` |
 | `reasoning_effort` | string | 推理强度 | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `deepsearch` | string | 深度搜索预设: `default`(标准)/`deeper`(更深度)/`null`(不启用) | `default`, `deeper`, `null` |
 | `temperature` | number | 采样温度 | `0` ~ `2` |
 | `top_p` | number | nucleus 采样 | `0` ~ `1` |
 | `video_config` | object | **视频模型专用配置对象** | 支持：`grok-imagine-1.0-video` |
