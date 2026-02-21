@@ -27,6 +27,7 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        deepsearch_preset: str = None,
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
@@ -71,6 +72,8 @@ class AppChatReverse:
         if model_config_override:
             payload["responseMetadata"]["modelConfigOverride"] = model_config_override
 
+        payload["deepsearchPreset"] = deepsearch_preset or ""
+
         return payload
 
     @staticmethod
@@ -83,9 +86,10 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        deepsearch_preset: str = None,
     ) -> Any:
         """Send app chat request to Grok.
-        
+
         Args:
             session: AsyncSession, the session to use for the request.
             token: str, the SSO token.
@@ -95,6 +99,7 @@ class AppChatReverse:
             file_attachments: List[str], the file attachments to send.
             tool_overrides: Dict[str, Any], the tool overrides to use.
             model_config_override: Dict[str, Any], the model config override to use.
+            deepsearch_preset: str, the deepsearch preset to use.
 
         Returns:
             Any: The response from the request.
@@ -120,6 +125,7 @@ class AppChatReverse:
                 file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
+                deepsearch_preset=deepsearch_preset,
             )
 
             # Curl Config

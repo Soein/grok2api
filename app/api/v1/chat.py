@@ -3,6 +3,7 @@ Chat Completions API 路由
 """
 
 from typing import Any, Dict, List, Optional, Union
+import asyncio
 import base64
 import binascii
 import time
@@ -55,6 +56,7 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: Optional[str] = Field(None, description="推理强度: none/minimal/low/medium/high/xhigh")
     temperature: Optional[float] = Field(0.8, description="采样温度: 0-2")
     top_p: Optional[float] = Field(0.95, description="nucleus 采样: 0-1")
+    deepsearch: Optional[str] = Field(None, description="深度搜索预设: default/deeper")
     # 视频生成配置
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
     # 图片生成配置
@@ -362,6 +364,14 @@ def validate_request(request: ChatCompletionRequest):
                 code="invalid_reasoning_effort",
             )
 
+    if request.deepsearch is not None:
+        if request.deepsearch not in {"default", "deeper"}:
+            raise ValidationException(
+                message="deepsearch must be one of ['default', 'deeper']",
+                param="deepsearch",
+                code="invalid_deepsearch",
+            )
+
     if request.temperature is None:
         request.temperature = 0.8
     else:
@@ -497,6 +507,27 @@ def validate_request(request: ChatCompletionRequest):
                 code="invalid_preset",
             )
         request.video_config = config
+
+
+async def stream_with_heartbeat(original_stream, interval: int = 30):
+    """为流式响应添加主动心跳，防止反代/CDN 超时断连。
+
+    - 初始心跳: SSE 注释 + 2KB 填充（触发客户端缓冲区刷新）
+    - 每 interval 秒: 发送 `: ping` 心跳保持连接
+    """
+    yield ": heartbeat stream connected\n" + " " * 2048 + "\n\n"
+
+    aiter = original_stream.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
+            yield chunk
+        except asyncio.TimeoutError:
+            yield ": ping\n\n"
+        except StopAsyncIteration:
+            break
+        except asyncio.CancelledError:
+            break
 
 
 router = APIRouter(tags=["Chat"])
@@ -660,15 +691,20 @@ async def chat_completions(request: ChatCompletionRequest):
             reasoning_effort=request.reasoning_effort,
             temperature=request.temperature,
             top_p=request.top_p,
+            deepsearch=request.deepsearch,
         )
 
     if isinstance(result, dict):
         return JSONResponse(content=result)
     else:
         return StreamingResponse(
-            result,
+            stream_with_heartbeat(result, interval=30),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
 

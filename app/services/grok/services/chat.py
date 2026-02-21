@@ -103,6 +103,15 @@ class MessageExtractor:
     """消息内容提取器"""
 
     @staticmethod
+    def remove_think_tags(text: str) -> str:
+        """清理消息中的 think 标签和内联 base64 图片"""
+        if not text or not isinstance(text, str):
+            return text
+        text = re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+        text = re.sub(r'!\[image\]\(data:.*?base64,.*?\)', '[图片]', text)
+        return text
+
+    @staticmethod
     def extract(messages: List[Dict[str, Any]]) -> tuple[str, List[str], List[str]]:
         """从 OpenAI 消息格式提取内容，返回 (text, file_attachments, image_attachments)"""
         texts = []
@@ -117,14 +126,14 @@ class MessageExtractor:
 
             if isinstance(content, str):
                 if content.strip():
-                    parts.append(content)
+                    parts.append(MessageExtractor.remove_think_tags(content))
             elif isinstance(content, list):
                 for item in content:
                     item_type = item.get("type", "")
 
                     if item_type == "text":
                         if text := item.get("text", "").strip():
-                            parts.append(text)
+                            parts.append(MessageExtractor.remove_think_tags(text))
 
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
@@ -178,6 +187,7 @@ class GrokChatService:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        deepsearch_preset: str = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -202,6 +212,7 @@ class GrokChatService:
                         file_attachments=file_attachments,
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
+                        deepsearch_preset=deepsearch_preset,
                     )
                     logger.info(f"Chat connected: model={model}, stream={stream}")
                     async for line in stream_response:
@@ -224,6 +235,7 @@ class GrokChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        deepsearch: str = None,
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
@@ -276,6 +288,7 @@ class GrokChatService:
             stream,
             file_attachments=all_attachments,
             model_config_override=model_config_override,
+            deepsearch_preset=deepsearch,
         )
 
         return response, stream, model
@@ -292,6 +305,7 @@ class ChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        deepsearch: str = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -336,6 +350,7 @@ class ChatService:
                     reasoning_effort=reasoning_effort,
                     temperature=temperature,
                     top_p=top_p,
+                    deepsearch=deepsearch,
                 )
 
                 # 处理响应
