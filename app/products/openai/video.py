@@ -18,7 +18,13 @@ from urllib.parse import urlparse
 import orjson
 
 from app.platform.config.snapshot import get_config
-from app.platform.errors import AppError, ErrorKind, RateLimitError, UpstreamError, ValidationError
+from app.platform.errors import (
+    AppError,
+    ErrorKind,
+    RateLimitError,
+    UpstreamError,
+    ValidationError,
+)
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.storage import video_files_dir
@@ -28,7 +34,10 @@ from app.control.model.registry import resolve as resolve_model
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
-from app.dataplane.reverse.protocol.xai_assets import resolve_asset_reference, resolve_download_url
+from app.dataplane.reverse.protocol.xai_assets import (
+    resolve_asset_reference,
+    resolve_download_url,
+)
 from app.dataplane.reverse.protocol.xai_chat import classify_line
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import (
@@ -126,11 +135,8 @@ _VIDEO_JOBS: dict[str, _VideoJob] = {}
 _VIDEO_JOBS_LOCK = asyncio.Lock()
 
 
-def _build_message(prompt: str, preset: str, *, reference_content_url: str | None = None) -> str:
-    message = f"{prompt} {_PRESET_FLAGS.get(preset, '--mode=custom')}".strip()
-    if reference_content_url:
-        return f"{reference_content_url}  {message}"
-    return message
+def _build_message(prompt: str, preset: str) -> str:
+    return f"{prompt} {_PRESET_FLAGS.get(preset, '--mode=custom')}".strip()
 
 
 def _progress_reason(progress: int) -> str:
@@ -148,7 +154,9 @@ def _coerce_seconds(value: str | int | None) -> int:
     try:
         return int(text)
     except ValueError as exc:
-        raise ValidationError("seconds must be an integer string", param="seconds") from exc
+        raise ValidationError(
+            "seconds must be an integer string", param="seconds"
+        ) from exc
 
 
 def validate_video_length(seconds: int) -> None:
@@ -169,7 +177,9 @@ def _resolve_video_size(size: str) -> tuple[str, str]:
 def _resolve_video_resolution_name(value: str | None, *, default: str = "720p") -> str:
     normalized = (value or default).strip().lower()
     if normalized not in {"480p", "720p"}:
-        raise ValidationError("resolution_name must be one of [480p, 720p]", param="resolution_name")
+        raise ValidationError(
+            "resolution_name must be one of [480p, 720p]", param="resolution_name"
+        )
     return normalized
 
 
@@ -204,32 +214,33 @@ def _video_create_payload(
     resolution_name: str,
     video_length: int,
     preset: str,
-    reference_content_url: str | None = None,
-    file_attachments: list[str] | None = None,
+    image_references: list[str] | None = None,
 ) -> dict[str, Any]:
-    payload = {
+    video_gen_config: dict[str, Any] = {
+        "parentPostId": parent_post_id,
+        "aspectRatio": aspect_ratio,
+        "videoLength": video_length,
+        "resolutionName": resolution_name,
+    }
+    if image_references:
+        video_gen_config["isVideoEdit"] = False
+        video_gen_config["isReferenceToVideo"] = True
+        video_gen_config["imageReferences"] = image_references
+    return {
         "temporary": True,
         "modelName": _VIDEO_MODEL_NAME,
-        "message": _build_message(prompt, preset, reference_content_url=reference_content_url),
+        "message": _build_message(prompt, preset),
         "toolOverrides": {"videoGen": True},
         "enableSideBySide": True,
         "responseMetadata": {
             "experiments": [],
             "modelConfigOverride": {
                 "modelMap": {
-                    "videoGenModelConfig": {
-                        "parentPostId": parent_post_id,
-                        "aspectRatio": aspect_ratio,
-                        "videoLength": video_length,
-                        "resolutionName": resolution_name,
-                    }
+                    "videoGenModelConfig": video_gen_config,
                 }
             },
         },
     }
-    if file_attachments:
-        payload["fileAttachments"] = file_attachments
-    return payload
 
 
 def _video_extend_start_time(seconds: int) -> float:
@@ -356,25 +367,41 @@ def _is_upstream_asset_content_url(value: str) -> bool:
     )
 
 
-async def _prepare_video_reference(token: str, input_reference: dict[str, Any]) -> _VideoReference:
+async def _prepare_video_reference(
+    token: str, input_reference: dict[str, Any]
+) -> _VideoReference:
     file_id = str(input_reference.get("file_id") or "").strip()
     image_input = str(input_reference.get("image_url") or "").strip()
 
     if file_id and image_input:
-        raise ValidationError("input_reference accepts only one of file_id or image_url", param="input_reference")
+        raise ValidationError(
+            "input_reference accepts only one of file_id or image_url",
+            param="input_reference",
+        )
     if file_id:
-        raise ValidationError("input_reference.file_id is not supported yet", param="input_reference.file_id")
+        raise ValidationError(
+            "input_reference.file_id is not supported yet",
+            param="input_reference.file_id",
+        )
     if not image_input:
-        raise ValidationError("input_reference.image_url is required", param="input_reference.image_url")
+        raise ValidationError(
+            "input_reference.image_url is required", param="input_reference.image_url"
+        )
 
     if _is_upstream_asset_content_url(image_input):
         content_url = image_input
     else:
         try:
-            uploaded_file_id, uploaded_file_uri = await upload_from_input(token, image_input)
-            content_url = resolve_uploaded_asset_reference(token, uploaded_file_id, uploaded_file_uri)
+            uploaded_file_id, uploaded_file_uri = await upload_from_input(
+                token, image_input
+            )
+            content_url = resolve_uploaded_asset_reference(
+                token, uploaded_file_id, uploaded_file_uri
+            )
         except ValidationError as exc:
-            raise ValidationError(exc.message, param="input_reference.image_url") from exc
+            raise ValidationError(
+                exc.message, param="input_reference.image_url"
+            ) from exc
         except UpstreamError as exc:
             raise UpstreamError(
                 f"Video input reference upload failed: {exc.message}",
@@ -393,11 +420,30 @@ async def _prepare_video_reference(token: str, input_reference: dict[str, Any]) 
     )
     post_data = post.get("post")
     if not isinstance(post_data, dict):
-        raise UpstreamError("Video image reference create-post returned no post payload")
+        raise UpstreamError(
+            "Video image reference create-post returned no post payload"
+        )
     post_id = str(post_data.get("id") or "").strip()
     if not post_id:
         raise UpstreamError("Video image reference create-post returned no post id")
     return _VideoReference(content_url=content_url, post_id=post_id)
+
+
+async def _prepare_video_references(
+    token: str,
+    input_references: list[dict[str, Any]],
+) -> list[_VideoReference]:
+    """Upload multiple video references concurrently and preserve order."""
+    results: list[_VideoReference | None] = [None] * len(input_references)
+
+    async def _runner(index: int, ref: dict[str, Any]) -> None:
+        results[index] = await _prepare_video_reference(token, ref)
+
+    async with asyncio.TaskGroup() as tg:
+        for index, ref in enumerate(input_references):
+            tg.create_task(_runner(index, ref), name=f"video-ref-{index}")
+
+    return [r for r in results if r is not None]
 
 
 async def _collect_video_segment(
@@ -464,7 +510,9 @@ async def _collect_video_segment(
         final_url = resolve_asset_reference(final_asset_id, "", user_id=None) or ""
 
     if not final_url and final_asset_id:
-        raise UpstreamError("Video segment returned only assetId without a resolvable URL")
+        raise UpstreamError(
+            "Video segment returned only assetId without a resolvable URL"
+        )
     if not final_url:
         raise UpstreamError("Video generation returned no final video URL")
 
@@ -499,7 +547,11 @@ def _save_video_bytes(raw: bytes, file_id: str) -> Path:
 
 def _local_video_url(file_id: str) -> str:
     app_url = get_config().get_str("app.app_url", "").rstrip("/")
-    return f"{app_url}/v1/files/video?id={file_id}" if app_url else f"/v1/files/video?id={file_id}"
+    return (
+        f"{app_url}/v1/files/video?id={file_id}"
+        if app_url
+        else f"/v1/files/video?id={file_id}"
+    )
 
 
 def _normalize_video_format(value: str | None) -> str:
@@ -518,7 +570,9 @@ def _render_video_html(url: str) -> str:
 
 
 async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
-    fmt = _normalize_video_format(get_config().get_str("features.video_format", "grok_url"))
+    fmt = _normalize_video_format(
+        get_config().get_str("features.video_format", "grok_url")
+    )
     if fmt == "grok_url":
         return url
     if fmt == "grok_html":
@@ -544,13 +598,13 @@ async def _generate_video_with_token(
     seconds: int,
     preset: str,
     timeout_s: float,
-    input_reference: dict[str, Any] | None = None,
+    input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
-    reference: _VideoReference | None = None
-    if input_reference:
-        reference = await _prepare_video_reference(token, input_reference)
-        parent_post_id = reference.post_id
+    references: list[_VideoReference] = []
+    if input_references:
+        references = await _prepare_video_references(token, input_references)
+        parent_post_id = references[0].post_id
     else:
         post = await create_media_post(
             token,
@@ -580,8 +634,9 @@ async def _generate_video_with_token(
                 resolution_name=resolution_name,
                 video_length=segment_length,
                 preset=preset,
-                reference_content_url=reference.content_url if reference is not None else None,
-                file_attachments=[reference.post_id] if reference is not None else None,
+                image_references=[r.content_url for r in references]
+                if references
+                else None,
             )
             referer = "https://grok.com/imagine"
         else:
@@ -600,7 +655,9 @@ async def _generate_video_with_token(
         async def _segment_progress(progress: int) -> None:
             if progress_cb is None:
                 return
-            scaled = int(((index + (max(0, min(100, progress)) / 100.0)) / total_segments) * 100)
+            scaled = int(
+                ((index + (max(0, min(100, progress)) / 100.0)) / total_segments) * 100
+            )
             await progress_cb(scaled)
 
         artifact = await _collect_video_segment(
@@ -628,7 +685,7 @@ async def _run_video_generation(
     resolution_name: str,
     seconds: int,
     preset: str = "custom",
-    input_reference: dict[str, Any] | None = None,
+    input_references: list[dict[str, Any]] | None = None,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
 ) -> _VideoArtifact:
     async def _runner(token: str, timeout_s: float) -> _VideoArtifact:
@@ -640,7 +697,7 @@ async def _run_video_generation(
             seconds=seconds,
             preset=preset,
             timeout_s=timeout_s,
-            input_reference=input_reference,
+            input_references=input_references,
             progress_cb=progress_cb,
         )
 
@@ -659,6 +716,7 @@ async def _run_video_with_account(
         raise ValidationError(f"Model {model!r} is not a video model", param="model")
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
@@ -682,7 +740,13 @@ async def _run_video_with_account(
         raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+        kind = (
+            FeedbackKind.SUCCESS
+            if success
+            else _feedback_kind(fail_exc)
+            if fail_exc
+            else FeedbackKind.SERVER_ERROR
+        )
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
@@ -706,7 +770,9 @@ async def _expire_video_job(video_id: str, ttl_s: int = _VIDEO_JOB_TTL_S) -> Non
         _VIDEO_JOBS.pop(video_id, None)
 
 
-async def _set_job_status(job: _VideoJob, *, status: str, progress: int | None = None) -> None:
+async def _set_job_status(
+    job: _VideoJob, *, status: str, progress: int | None = None
+) -> None:
     async with _VIDEO_JOBS_LOCK:
         job.status = status
         if progress is not None:
@@ -725,7 +791,7 @@ async def _run_video_job(
     prompt: str,
     seconds: int,
     preset: str | None,
-    input_reference: dict[str, Any] | None = None,
+    input_references: list[dict[str, Any]] | None = None,
 ) -> None:
     try:
         await _set_job_status(job, status="in_progress", progress=1)
@@ -738,6 +804,7 @@ async def _run_video_job(
         spec = resolve_model(job.model)
 
         from app.dataplane.account import _directory as _acct_dir
+
         if _acct_dir is None:
             raise RateLimitError("Account directory not initialised")
 
@@ -757,7 +824,9 @@ async def _run_video_job(
             timeout_s = cfg.get_float("video.timeout", 180.0)
 
             async def _progress(progress: int) -> None:
-                await _set_job_status(job, status="in_progress", progress=max(1, progress))
+                await _set_job_status(
+                    job, status="in_progress", progress=max(1, progress)
+                )
 
             artifact = await _generate_video_with_token(
                 token=token,
@@ -767,7 +836,7 @@ async def _run_video_job(
                 seconds=seconds,
                 preset=resolved_preset,
                 timeout_s=timeout_s,
-                input_reference=input_reference,
+                input_references=input_references,
                 progress_cb=_progress,
             )
             raw, _mime = await _download_video_bytes(token, artifact.video_url)
@@ -777,7 +846,13 @@ async def _run_video_job(
             raise
         finally:
             await _acct_dir.release(acct)
-            kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+            kind = (
+                FeedbackKind.SUCCESS
+                if success
+                else _feedback_kind(fail_exc)
+                if fail_exc
+                else FeedbackKind.SERVER_ERROR
+            )
             await _acct_dir.feedback(token, kind, int(spec.mode_id))
             if success:
                 asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
@@ -807,7 +882,7 @@ async def create_video(
     size: str | None = None,
     resolution_name: str | None = None,
     preset: str | None = None,
-    input_reference: dict[str, Any] | None = None,
+    input_references: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     spec = model_registry.get(model)
     if spec is None or not spec.enabled or not spec.is_video():
@@ -842,7 +917,7 @@ async def create_video(
             prompt=cleaned_prompt,
             seconds=normalized_seconds,
             preset=preset,
-            input_reference=input_reference,
+            input_references=input_references,
         )
     )
     asyncio.create_task(_expire_video_job(job.id))
@@ -869,13 +944,17 @@ async def content_path(video_id: str) -> Path:
         )
     path = Path(job.content_path)
     if not path.exists():
-        raise ValidationError(f"Video content for {video_id!r} not found", param="video_id")
+        raise ValidationError(
+            f"Video content for {video_id!r} not found", param="video_id"
+        )
     return path
 
 
-def _extract_video_prompt_and_reference(messages: list[dict]) -> tuple[str, dict[str, Any] | None]:
+def _extract_video_prompt_and_reference(
+    messages: list[dict],
+) -> tuple[str, list[dict[str, Any]] | None]:
     prompt = ""
-    reference_url = ""
+    reference_urls: list[str] = []
 
     for msg in reversed(messages):
         content = msg.get("content", "")
@@ -888,7 +967,7 @@ def _extract_video_prompt_and_reference(messages: list[dict]) -> tuple[str, dict
             continue
 
         text_parts: list[str] = []
-        block_reference = ""
+        block_references: list[str] = []
         for item in content:
             if not isinstance(item, dict):
                 continue
@@ -900,24 +979,26 @@ def _extract_video_prompt_and_reference(messages: list[dict]) -> tuple[str, dict
             elif item_type == "image_url":
                 image_url = item.get("image_url")
                 if isinstance(image_url, dict):
-                    block_reference = str(image_url.get("url") or "").strip() or block_reference
-                elif isinstance(image_url, str):
-                    block_reference = image_url.strip() or block_reference
+                    url = str(image_url.get("url") or "").strip()
+                    if url:
+                        block_references.append(url)
+                elif isinstance(image_url, str) and image_url.strip():
+                    block_references.append(image_url.strip())
 
         if text_parts:
             prompt = " ".join(text_parts)
-        if block_reference and not reference_url:
-            reference_url = block_reference
+        if block_references and not reference_urls:
+            reference_urls = block_references
         if prompt:
             break
 
     if not prompt:
         raise ValidationError("Video prompt cannot be empty", param="messages")
 
-    input_reference: dict[str, Any] | None = None
-    if reference_url:
-        input_reference = {"image_url": reference_url}
-    return prompt, input_reference
+    input_references: list[dict[str, Any]] | None = None
+    if reference_urls:
+        input_references = [{"image_url": url} for url in reference_urls[:5]]
+    return prompt, input_references
 
 
 async def completions(
@@ -938,7 +1019,7 @@ async def completions(
         default=default_resolution_name,
     )
     resolved_preset = _resolve_video_preset(preset)
-    prompt, input_reference = _extract_video_prompt_and_reference(messages)
+    prompt, input_references = _extract_video_prompt_and_reference(messages)
 
     cfg = get_config()
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", False)
@@ -954,7 +1035,7 @@ async def completions(
                 seconds=seconds,
                 preset=resolved_preset,
                 timeout_s=timeout_s,
-                input_reference=input_reference,
+                input_references=input_references,
                 progress_cb=progress_cb,
             )
             file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
@@ -967,6 +1048,7 @@ async def completions(
         return await _run_video_with_account(model=model, runner=_runner)
 
     if is_stream:
+
         async def _sse() -> AsyncGenerator[str, None]:
             queue: asyncio.Queue[int] = asyncio.Queue()
             last_progress = -1
@@ -982,7 +1064,9 @@ async def completions(
                     continue
                 if progress > last_progress:
                     last_progress = progress
-                    chunk = make_thinking_chunk(response_id, model, _progress_reason(progress))
+                    chunk = make_thinking_chunk(
+                        response_id, model, _progress_reason(progress)
+                    )
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
             content = await task

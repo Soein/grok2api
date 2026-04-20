@@ -545,6 +545,7 @@
     .q-f { background:#f2f8f4; color:#4c9168 }
     .q-e { background:#f7f3fb; color:#8d6bbd }
     .q-h { background:#fff4ed; color:#b0632a }
+    .q-b { background:#fdf2f7; color:#be3f7f }
     .q-z { background:#f6f6f6; color:#a0a0a6 }
 
     /* Token monospace */
@@ -1434,10 +1435,19 @@ function rowHtml(t) {
 }
 
 function qpills(q) {
-  const modes = [['auto','A','q-a'],['fast','F','q-f'],['expert','E','q-e'],['heavy','H','q-h']];
-  return modes.map(([m,l,c]) => {
+  const modes = [
+    ['auto',     'A', 'q-a', true],
+    ['fast',     'F', 'q-f', true],
+    ['expert',   'E', 'q-e', true],
+    ['heavy',    'H', 'q-h', true],
+    ['grok_4_3', 'B', 'q-b', false],
+  ];
+  return modes.map(([m,l,c,showEmpty]) => {
     const win = q[m];
-    if (win == null) return `<span class="q-pill q-z" data-tip="${xe(tr(`account.mode.${m}`, null, m))}: 0">${l}:0</span>`;
+    if (win == null) {
+      if (!showEmpty) return '';
+      return `<span class="q-pill q-z" data-tip="${xe(tr(`account.mode.${m}`, null, m))}: 0">${l}:0</span>`;
+    }
     const r = win.remaining ?? null;
     return `<span class="q-pill ${r ? c : 'q-z'}" data-tip="${xe(`${tr(`account.mode.${m}`, null, m)}: ${r ?? tr('account.unknown', null, '未知')}/${win.total ?? '?'}`)}">${l}:${r ?? '?'}</span>`;
   }).join('');

@@ -434,7 +434,7 @@ async def completions(
     model: str,
     messages: list[dict],
     stream: bool | None = None,
-    thinking: bool | None = None,
+    emit_think: bool | None = None,
     tools: list[dict] | None = None,
     tool_choice: Any = None,
     temperature: float = 0.8,
@@ -450,9 +450,8 @@ async def completions(
     cfg = get_config()
     spec = resolve_model(model)
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", True)
-    emit_think = (
-        thinking if thinking is not None else cfg.get_bool("features.thinking", True)
-    )
+    if emit_think is None:
+        emit_think = cfg.get_bool("features.thinking", True)
 
     logger.info(
         "chat request accepted: model={} stream={} message_count={}",

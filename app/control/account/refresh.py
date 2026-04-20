@@ -9,7 +9,7 @@ from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 from app.platform.runtime.batch import run_batch
-from app.control.model.enums import ALL_MODES_WITH_HEAVY
+from app.control.model.enums import ALL_MODES_FULL
 from .enums import AccountStatus, QuotaSource
 from .models import AccountRecord, QuotaWindow
 from .quota_defaults import (
@@ -49,6 +49,7 @@ _MODE_KEYS = {
     1: "quota_fast",
     2: "quota_expert",
     3: "quota_heavy",
+    4: "quota_grok_4_3",
 }
 
 
@@ -248,7 +249,7 @@ class AccountRefreshService:
         patches: dict[str, dict] = {}
         refreshed = False
 
-        for mode in ALL_MODES_WITH_HEAVY:
+        for mode in ALL_MODES_FULL:
             mode_id = int(mode)
             if mode_id in windows:
                 patches[_MODE_KEYS[mode_id]] = windows[mode_id].to_dict()
@@ -320,7 +321,7 @@ class AccountRefreshService:
         now = now_ms()
         patches: dict[str, dict] = {}
 
-        for mode in ALL_MODES_WITH_HEAVY:
+        for mode in ALL_MODES_FULL:
             mode_id = int(mode)
             existing = qs.get(mode_id)
             if existing is None:

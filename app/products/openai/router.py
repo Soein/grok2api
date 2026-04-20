@@ -324,11 +324,16 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             request_overrides: dict | None = None
             if req.deepsearch:
                 request_overrides = {"deepsearchPreset": req.deepsearch}
+            # reasoning_effort=None → config default; "none" → off; otherwise → on.
+            if req.reasoning_effort is None:
+                emit_think: bool | None = None
+            else:
+                emit_think = req.reasoning_effort != "none"
             result = await chat_completions(
                 model=req.model,
                 messages=messages,
                 stream=is_stream,
-                thinking=req.thinking,
+                emit_think=emit_think,
                 tools=req.tools,
                 tool_choice=req.tool_choice,
                 temperature=req.temperature or 0.8,
@@ -504,17 +509,18 @@ async def videos_create(
     preset: Annotated[
         Literal["fun", "normal", "spicy", "custom"] | None, Form()
     ] = None,
-    input_reference: Annotated[UploadFile | None, File()] = None,
+    input_reference: Annotated[
+        list[UploadFile] | None, File(alias="input_reference[]")
+    ] = None,
 ):
     from .video import create_video
 
-    reference_payload = None
-    if input_reference is not None:
-        reference_payload = {
-            "image_url": await _upload_to_data_uri(
-                input_reference, param="input_reference"
-            ),
-        }
+    references_payload = None
+    if input_reference:
+        references_payload = [
+            {"image_url": await _upload_to_data_uri(f, param="input_reference")}
+            for f in input_reference[:5]
+        ]
 
     result = await create_video(
         model=model or "grok-video",
@@ -523,7 +529,7 @@ async def videos_create(
         size=size or "720x1280",
         resolution_name=resolution_name,
         preset=preset,
-        input_reference=reference_payload,
+        input_references=references_payload,
     )
     return JSONResponse(result)
 

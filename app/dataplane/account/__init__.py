@@ -14,7 +14,7 @@ from app.control.account.repository import AccountRepository
 from app.control.account.enums import FeedbackKind
 from .table import AccountRuntimeTable
 from .lease import AccountLease, new_lease
-from .selector import select
+from .selector import select, select_any
 from .sync import bootstrap as _bootstrap, apply_changes
 from . import feedback as fb
 from ..shared.enums import StatusId
@@ -147,6 +147,73 @@ class AccountDirectory:
             token=token,
             pool_id=actual_pool,
             mode_id=mode_id,
+            selected_at=ts,
+        )
+
+    async def reserve_any(
+        self,
+        pool_candidates: tuple[int, ...] | int,
+        *,
+        exclude_tokens: list[str] | None = None,
+        prefer_tags: list[str] | None = None,
+        now_s_override: int | None = None,
+    ) -> AccountLease | None:
+        """Select any active account from pool_candidates without mode quota checking.
+
+        Used for WebSocket-based operations that manage their own upstream rate limiting.
+        Returns an AccountLease with mode_id=-1 (no specific mode is tracked).
+        """
+        table = self._table
+        if table is None:
+            return None
+
+        pools: tuple[int, ...] = (
+            (pool_candidates,) if isinstance(pool_candidates, int) else pool_candidates
+        )
+        ts = now_s_override if now_s_override is not None else now_s()
+
+        exclude_idxs: frozenset[int] | None = None
+        if exclude_tokens:
+            idxs = [
+                table.idx_by_token[t] for t in exclude_tokens if t in table.idx_by_token
+            ]
+            if idxs:
+                exclude_idxs = frozenset(idxs)
+
+        prefer_tag_idxs: set[int] | None = None
+        if prefer_tags:
+            sets = [
+                table.tag_idx.get(tag) for tag in prefer_tags if tag in table.tag_idx
+            ]
+            if sets:
+                prefer_tag_idxs = set().union(*sets)
+
+        async with self._lock:
+            idx: int | None = None
+            for pool_id in pools:
+                idx = select_any(
+                    table,
+                    pool_id,
+                    exclude_idxs=exclude_idxs,
+                    prefer_tag_idxs=prefer_tag_idxs,
+                    now_s=ts,
+                )
+                if idx is not None:
+                    break
+
+            if idx is None:
+                return None
+
+            fb.increment_inflight(table, idx)
+            fb.update_last_use(table, idx, ts)
+            token = table.get_token(idx)
+            actual_pool = table.get_pool_id(idx)
+
+        return new_lease(
+            idx=idx,
+            token=token,
+            pool_id=actual_pool,
+            mode_id=-1,  # no specific mode tracked for WS operations
             selected_at=ts,
         )
 

@@ -8,7 +8,7 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.model.enums import ModeId, MODE_STRINGS
+from app.control.model.enums import ModeId
 from app.dataplane.reverse.protocol.xai_chat_reasoning import ReasoningAggregator
 
 
@@ -49,7 +49,7 @@ def build_chat_payload(
         "imageGenerationCount":        2,
         "isAsyncChat":                 False,
         "message":                     message,
-        "modeId":                      MODE_STRINGS[mode_id],
+        "modeId":                      mode_id.to_api_str(),
         "responseMetadata":            {},
         "returnImageBytes":            False,
         "returnRawGrokInXaiRequest":   False,
@@ -77,7 +77,7 @@ def build_chat_payload(
 
     logger.debug(
         "chat payload built: mode={} message_len={} file_count={}",
-        MODE_STRINGS[mode_id], len(message), len(file_attachments),
+        mode_id.to_api_str(), len(message), len(file_attachments),
     )
     return payload
 

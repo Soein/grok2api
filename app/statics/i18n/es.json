@@ -283,7 +283,8 @@
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {
       "active": "Activa",

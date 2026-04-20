@@ -12,7 +12,7 @@ import array
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from ..shared.enums import ALL_MODE_IDS, POOL_STR_TO_ID, STATUS_STR_TO_ID, PoolId, StatusId
+from ..shared.enums import ALL_MODE_IDS, StatusId
 
 # ---------------------------------------------------------------------------
 # Column type codes
@@ -23,13 +23,26 @@ from ..shared.enums import ALL_MODE_IDS, POOL_STR_TO_ID, STATUS_STR_TO_ID, PoolI
 #   'L'  uint32  — epoch-second timestamps / window lengths (valid until year 2106)
 # ---------------------------------------------------------------------------
 
-_QUOTA_COLS  = ("quota_auto", "quota_fast", "quota_expert", "quota_heavy")
-_RESET_COLS  = ("reset_auto", "reset_fast", "reset_expert", "reset_heavy")
-_INFLIGHT_CAP = 32_767   # avoid int16 overflow on quota
+_QUOTA_COLS = (
+    "quota_auto",
+    "quota_fast",
+    "quota_expert",
+    "quota_heavy",
+    "quota_grok_4_3",
+)
+_RESET_COLS = (
+    "reset_auto",
+    "reset_fast",
+    "reset_expert",
+    "reset_heavy",
+    "reset_grok_4_3",
+)
+_INFLIGHT_CAP = 32_767  # avoid int16 overflow on quota
 
 # ---------------------------------------------------------------------------
 # AccountRuntimeTable
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class AccountRuntimeTable:
@@ -50,39 +63,93 @@ class AccountRuntimeTable:
     status_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("B"))
 
     # --- Quota remaining per mode (int16; -1 = unknown) ---
-    quota_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    quota_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    quota_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    quota_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    quota_auto_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    quota_fast_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    quota_expert_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    quota_heavy_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    quota_grok_4_3_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
 
     # --- Quota total per mode (int16; 0 = unsupported / unknown) ---
-    total_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    total_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    total_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("h"))
-    total_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    total_auto_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    total_fast_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    total_expert_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    total_heavy_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
+    total_grok_4_3_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("h")
+    )
 
     # --- Window size per mode (uint32 seconds; 0 = unsupported / unknown) ---
-    window_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    window_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    window_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    window_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    window_auto_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    window_fast_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    window_expert_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    window_heavy_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    window_grok_4_3_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
 
     # --- Window reset timestamps (uint32 epoch-seconds; 0 = unknown) ---
-    reset_auto_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    reset_fast_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    reset_expert_at_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    reset_heavy_at_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    reset_auto_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    reset_fast_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    reset_expert_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    reset_heavy_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    reset_grok_4_3_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
 
     # --- Runtime counters (uint16) ---
-    inflight_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("H"))
-    fail_count_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("H"))
+    inflight_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("H")
+    )
+    fail_count_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("H")
+    )
 
     # --- Health score (float32; [0.05, 1.0]) ---
-    health_by_idx: "array.array[float]" = field(default_factory=lambda: array.array("f"))
+    health_by_idx: "array.array[float]" = field(
+        default_factory=lambda: array.array("f")
+    )
 
     # --- Last-activity timestamps (uint32 epoch-seconds; 0 = never) ---
-    last_use_at_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("L"))
-    last_fail_at_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    last_use_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+    last_fail_at_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
 
     # --- Pre-computed selection indexes ---
     # (pool_id, mode_id) → set of idx with a supported quota window and status == ACTIVE
@@ -99,28 +166,48 @@ class AccountRuntimeTable:
     # ---------------------------------------------------------------------------
 
     def _quota_col(self, mode_id: int) -> "array.array[int]":
-        if mode_id == 0: return self.quota_auto_by_idx
-        if mode_id == 1: return self.quota_fast_by_idx
-        if mode_id == 2: return self.quota_expert_by_idx
-        return self.quota_heavy_by_idx
+        if mode_id == 0:
+            return self.quota_auto_by_idx
+        if mode_id == 1:
+            return self.quota_fast_by_idx
+        if mode_id == 2:
+            return self.quota_expert_by_idx
+        if mode_id == 3:
+            return self.quota_heavy_by_idx
+        return self.quota_grok_4_3_by_idx
 
     def _reset_col(self, mode_id: int) -> "array.array[int]":
-        if mode_id == 0: return self.reset_auto_at_by_idx
-        if mode_id == 1: return self.reset_fast_at_by_idx
-        if mode_id == 2: return self.reset_expert_at_by_idx
-        return self.reset_heavy_at_by_idx
+        if mode_id == 0:
+            return self.reset_auto_at_by_idx
+        if mode_id == 1:
+            return self.reset_fast_at_by_idx
+        if mode_id == 2:
+            return self.reset_expert_at_by_idx
+        if mode_id == 3:
+            return self.reset_heavy_at_by_idx
+        return self.reset_grok_4_3_at_by_idx
 
     def _total_col(self, mode_id: int) -> "array.array[int]":
-        if mode_id == 0: return self.total_auto_by_idx
-        if mode_id == 1: return self.total_fast_by_idx
-        if mode_id == 2: return self.total_expert_by_idx
-        return self.total_heavy_by_idx
+        if mode_id == 0:
+            return self.total_auto_by_idx
+        if mode_id == 1:
+            return self.total_fast_by_idx
+        if mode_id == 2:
+            return self.total_expert_by_idx
+        if mode_id == 3:
+            return self.total_heavy_by_idx
+        return self.total_grok_4_3_by_idx
 
     def _window_col(self, mode_id: int) -> "array.array[int]":
-        if mode_id == 0: return self.window_auto_by_idx
-        if mode_id == 1: return self.window_fast_by_idx
-        if mode_id == 2: return self.window_expert_by_idx
-        return self.window_heavy_by_idx
+        if mode_id == 0:
+            return self.window_auto_by_idx
+        if mode_id == 1:
+            return self.window_fast_by_idx
+        if mode_id == 2:
+            return self.window_expert_by_idx
+        if mode_id == 3:
+            return self.window_heavy_by_idx
+        return self.window_grok_4_3_by_idx
 
     def _add_to_indexes(self, idx: int) -> None:
         pool_id   = int(self.pool_by_idx[idx])
@@ -154,30 +241,34 @@ class AccountRuntimeTable:
 
     def _append_slot(
         self,
-        token:        str,
-        pool_id:      int,
-        status_id:    int,
-        quota_auto:   int,
-        quota_fast:   int,
-        quota_expert: int,
-        quota_heavy:  int,
-        total_auto:   int,
-        total_fast:   int,
-        total_expert: int,
-        total_heavy:  int,
-        window_auto:  int,
-        window_fast:  int,
-        window_expert: int,
-        window_heavy: int,
-        reset_auto:   int,
-        reset_fast:   int,
-        reset_expert: int,
-        reset_heavy:  int,
-        health:       float,
-        last_use_s:   int,
-        last_fail_s:  int,
-        fail_count:   int,
-        tags:         list[str],
+        token:           str,
+        pool_id:         int,
+        status_id:       int,
+        quota_auto:      int,
+        quota_fast:      int,
+        quota_expert:    int,
+        quota_heavy:     int,
+        quota_grok_4_3:  int,
+        total_auto:      int,
+        total_fast:      int,
+        total_expert:    int,
+        total_heavy:     int,
+        total_grok_4_3:  int,
+        window_auto:     int,
+        window_fast:     int,
+        window_expert:   int,
+        window_heavy:    int,
+        window_grok_4_3: int,
+        reset_auto:      int,
+        reset_fast:      int,
+        reset_expert:    int,
+        reset_heavy:     int,
+        reset_grok_4_3:  int,
+        health:          float,
+        last_use_s:      int,
+        last_fail_s:     int,
+        fail_count:      int,
+        tags:            list[str],
     ) -> int:
         idx = len(self.token_by_idx)
         self.token_by_idx.append(token)
@@ -188,18 +279,22 @@ class AccountRuntimeTable:
         self.quota_fast_by_idx.append(max(-1, min(quota_fast, 32767)))
         self.quota_expert_by_idx.append(max(-1, min(quota_expert, 32767)))
         self.quota_heavy_by_idx.append(max(-1, min(quota_heavy, 32767)))
+        self.quota_grok_4_3_by_idx.append(max(-1, min(quota_grok_4_3, 32767)))
         self.total_auto_by_idx.append(max(0, min(total_auto, 32767)))
         self.total_fast_by_idx.append(max(0, min(total_fast, 32767)))
         self.total_expert_by_idx.append(max(0, min(total_expert, 32767)))
         self.total_heavy_by_idx.append(max(0, min(total_heavy, 32767)))
+        self.total_grok_4_3_by_idx.append(max(0, min(total_grok_4_3, 32767)))
         self.window_auto_by_idx.append(max(0, window_auto))
         self.window_fast_by_idx.append(max(0, window_fast))
         self.window_expert_by_idx.append(max(0, window_expert))
         self.window_heavy_by_idx.append(max(0, window_heavy))
+        self.window_grok_4_3_by_idx.append(max(0, window_grok_4_3))
         self.reset_auto_at_by_idx.append(reset_auto)
         self.reset_fast_at_by_idx.append(reset_fast)
         self.reset_expert_at_by_idx.append(reset_expert)
         self.reset_heavy_at_by_idx.append(reset_heavy)
+        self.reset_grok_4_3_at_by_idx.append(reset_grok_4_3)
         self.inflight_by_idx.append(0)
         self.fail_count_by_idx.append(min(fail_count, 65535))
         self.health_by_idx.append(health)
@@ -216,56 +311,64 @@ class AccountRuntimeTable:
 
     def _update_slot(
         self,
-        idx:          int,
-        pool_id:      int,
-        status_id:    int,
-        quota_auto:   int,
-        quota_fast:   int,
+        idx: int,
+        pool_id: int,
+        status_id: int,
+        quota_auto: int,
+        quota_fast: int,
         quota_expert: int,
-        quota_heavy:  int,
-        total_auto:   int,
-        total_fast:   int,
+        quota_heavy: int,
+        quota_grok_4_3: int,
+        total_auto: int,
+        total_fast: int,
         total_expert: int,
-        total_heavy:  int,
-        window_auto:  int,
-        window_fast:  int,
+        total_heavy: int,
+        total_grok_4_3: int,
+        window_auto: int,
+        window_fast: int,
         window_expert: int,
         window_heavy: int,
-        reset_auto:   int,
-        reset_fast:   int,
+        window_grok_4_3: int,
+        reset_auto: int,
+        reset_fast: int,
         reset_expert: int,
-        reset_heavy:  int,
-        health:       float,
-        last_use_s:   int,
-        last_fail_s:  int,
-        fail_count:   int,
-        old_tags:     list[str],
-        new_tags:     list[str],
+        reset_heavy: int,
+        reset_grok_4_3: int,
+        health: float,
+        last_use_s: int,
+        last_fail_s: int,
+        fail_count: int,
+        old_tags: list[str],
+        new_tags: list[str],
     ) -> None:
         self._remove_from_indexes(idx)
         self._remove_from_tag_idx(idx, old_tags)
 
-        self.pool_by_idx[idx]             = pool_id
-        self.status_by_idx[idx]           = status_id
-        self.quota_auto_by_idx[idx]       = max(-1, min(quota_auto, 32767))
-        self.quota_fast_by_idx[idx]       = max(-1, min(quota_fast, 32767))
-        self.quota_expert_by_idx[idx]     = max(-1, min(quota_expert, 32767))
-        self.quota_heavy_by_idx[idx]      = max(-1, min(quota_heavy, 32767))
-        self.total_auto_by_idx[idx]       = max(0, min(total_auto, 32767))
-        self.total_fast_by_idx[idx]       = max(0, min(total_fast, 32767))
-        self.total_expert_by_idx[idx]     = max(0, min(total_expert, 32767))
-        self.total_heavy_by_idx[idx]      = max(0, min(total_heavy, 32767))
-        self.window_auto_by_idx[idx]      = max(0, window_auto)
-        self.window_fast_by_idx[idx]      = max(0, window_fast)
-        self.window_expert_by_idx[idx]    = max(0, window_expert)
-        self.window_heavy_by_idx[idx]     = max(0, window_heavy)
-        self.reset_auto_at_by_idx[idx]    = reset_auto
-        self.reset_fast_at_by_idx[idx]    = reset_fast
-        self.reset_expert_at_by_idx[idx]  = reset_expert
-        self.reset_heavy_at_by_idx[idx]   = reset_heavy
-        self.fail_count_by_idx[idx]       = min(fail_count, 65535)
-        self.last_use_at_by_idx[idx]      = last_use_s
-        self.last_fail_at_by_idx[idx]     = last_fail_s
+        self.pool_by_idx[idx] = pool_id
+        self.status_by_idx[idx] = status_id
+        self.quota_auto_by_idx[idx] = max(-1, min(quota_auto, 32767))
+        self.quota_fast_by_idx[idx] = max(-1, min(quota_fast, 32767))
+        self.quota_expert_by_idx[idx] = max(-1, min(quota_expert, 32767))
+        self.quota_heavy_by_idx[idx] = max(-1, min(quota_heavy, 32767))
+        self.quota_grok_4_3_by_idx[idx] = max(-1, min(quota_grok_4_3, 32767))
+        self.total_auto_by_idx[idx] = max(0, min(total_auto, 32767))
+        self.total_fast_by_idx[idx] = max(0, min(total_fast, 32767))
+        self.total_expert_by_idx[idx] = max(0, min(total_expert, 32767))
+        self.total_heavy_by_idx[idx] = max(0, min(total_heavy, 32767))
+        self.total_grok_4_3_by_idx[idx] = max(0, min(total_grok_4_3, 32767))
+        self.window_auto_by_idx[idx] = max(0, window_auto)
+        self.window_fast_by_idx[idx] = max(0, window_fast)
+        self.window_expert_by_idx[idx] = max(0, window_expert)
+        self.window_heavy_by_idx[idx] = max(0, window_heavy)
+        self.window_grok_4_3_by_idx[idx] = max(0, window_grok_4_3)
+        self.reset_auto_at_by_idx[idx] = reset_auto
+        self.reset_fast_at_by_idx[idx] = reset_fast
+        self.reset_expert_at_by_idx[idx] = reset_expert
+        self.reset_heavy_at_by_idx[idx] = reset_heavy
+        self.reset_grok_4_3_at_by_idx[idx] = reset_grok_4_3
+        self.fail_count_by_idx[idx] = min(fail_count, 65535)
+        self.last_use_at_by_idx[idx] = last_use_s
+        self.last_fail_at_by_idx[idx] = last_fail_s
         # health is not reset on update
 
         self._add_to_indexes(idx)
