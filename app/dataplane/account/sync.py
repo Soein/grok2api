@@ -28,6 +28,12 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
             return 0
         return int(ms_to_s(window.reset_at))
 
+    def _total(window) -> int:
+        return max(0, int(window.total)) if window is not None else 0
+
+    def _window_s(window) -> int:
+        return max(0, int(window.window_seconds)) if window is not None else 0
+
     heavy_w = qs.heavy
     return dict(
         pool_id      = pool_id,
@@ -36,6 +42,14 @@ def _record_to_slot_args(record: AccountRecord) -> dict:
         quota_fast   = max(0, qs.fast.remaining),
         quota_expert = max(0, qs.expert.remaining),
         quota_heavy  = max(0, heavy_w.remaining) if heavy_w is not None else -1,
+        total_auto   = _total(qs.auto),
+        total_fast   = _total(qs.fast),
+        total_expert = _total(qs.expert),
+        total_heavy  = _total(heavy_w),
+        window_auto  = _window_s(qs.auto),
+        window_fast  = _window_s(qs.fast),
+        window_expert = _window_s(qs.expert),
+        window_heavy = _window_s(heavy_w),
         reset_auto   = _reset_s(qs.auto),
         reset_fast   = _reset_s(qs.fast),
         reset_expert = _reset_s(qs.expert),

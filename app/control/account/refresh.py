@@ -369,6 +369,40 @@ class AccountRefreshService:
                     record, exc
                 ):
                     return
+                if (
+                    record is not None
+                    and getattr(exc, "status", None) == 429
+                    and mode_id in _MODE_KEYS
+                ):
+                    now = now_ms()
+                    quota_patch: dict[str, dict] = {}
+                    window = record.quota_set().get(mode_id)
+                    if window is not None:
+                        reset_at = (
+                            window.reset_at
+                            if window.reset_at is not None and window.reset_at > now
+                            else now + max(window.window_seconds, 1) * 1000
+                        )
+                        quota_patch[_MODE_KEYS[mode_id]] = QuotaWindow(
+                            remaining=0,
+                            total=window.total,
+                            window_seconds=window.window_seconds,
+                            reset_at=reset_at,
+                            synced_at=window.synced_at,
+                            source=QuotaSource.ESTIMATED,
+                        ).to_dict()
+                    await self._repo.patch_accounts(
+                        [
+                            AccountPatch(
+                                token=token,
+                                usage_fail_delta=1,
+                                last_fail_at=now,
+                                last_fail_reason="rate_limited",
+                                **quota_patch,
+                            )
+                        ]
+                    )
+                    return
             await self._repo.patch_accounts(
                 [
                     AccountPatch(

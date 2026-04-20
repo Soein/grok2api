@@ -24,7 +24,10 @@ from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy import get_proxy_runtime
-from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.proxy.adapters.session import (
+    ResettableSession,
+    build_session_kwargs,
+)
 from app.dataplane.reverse.protocol.xai_chat import (
     build_chat_payload,
     classify_line,
@@ -51,6 +54,27 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
+from app.products._account_selection import reserve_account
+
+
+def _to_chat_annotations(anns: list[dict]) -> list[dict]:
+    """扁平 annotations → Chat Completions 嵌套格式（内层无 type）"""
+    return (
+        [
+            {
+                "type": "url_citation",
+                "url_citation": {
+                    "url": a["url"],
+                    "title": a["title"],
+                    "start_index": a["start_index"],
+                    "end_index": a["end_index"],
+                },
+            }
+            for a in anns
+        ]
+        if anns
+        else []
+    )
 
 
 def _log_task_exception(task: "asyncio.Task") -> None:
@@ -58,6 +82,25 @@ def _log_task_exception(task: "asyncio.Task") -> None:
     exc = task.exception() if not task.cancelled() else None
     if exc:
         logger.warning("background task failed: task={} error={}", task.get_name(), exc)
+
+
+def _upstream_body_excerpt(exc: UpstreamError, *, limit: int = 240) -> str:
+    details = getattr(exc, "details", {})
+    if not isinstance(details, dict):
+        return "-"
+    body = str(details.get("body", "") or "").replace("\n", "\\n")
+    return body[:limit] or "-"
+
+
+def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamError:
+    if isinstance(exc, UpstreamError):
+        return exc
+    body = str(exc).replace("\n", "\\n")[:400]
+    return UpstreamError(
+        f"{context}: {exc}",
+        status=502,
+        body=body,
+    )
 
 
 async def _quota_sync(token: str, mode_id: int) -> None:
@@ -83,6 +126,16 @@ async def _fail_sync(
         svc = get_refresh_service()
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
+            if getattr(exc, "status", None) == 429:
+                result = await svc.refresh_on_demand()
+                logger.info(
+                    "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
+                    token[:10],
+                    mode_id,
+                    result.refreshed,
+                    result.failed,
+                    result.rate_limited,
+                )
     except Exception as e:
         logger.warning(
             "chat fail sync error: token={}... mode_id={} error={}",
@@ -212,15 +265,20 @@ def _normalize_image_format(value: str | None) -> str:
 
 _THINK_TAG_RE = re.compile(r"<think>[\s\S]*?</think>")
 _INLINE_BASE64_IMG_RE = re.compile(r"!\[image\]\(data:[^)]*?base64,[^)]*?\)")
+# 精确匹配 grok2api 注入的 Sources 段落（含标记行），用于多轮对话剥离
+_SOURCES_STRIP_RE = re.compile(
+    r"(?:^|\r?\n\r?\n)## Sources\r?\n\[grok2api-sources\]: #\r?\n[\s\S]*$"
+)
 
 
-def _strip_think_and_inline_images(text: str) -> str:
-    """Remove <think>...</think> blocks and inline base64 images from text."""
+def _strip_generated_artifacts(text: str, *, strip_sources: bool = False) -> str:
+    """Remove generated assistant artifacts before reusing conversation history."""
     if not text or not isinstance(text, str):
         return text
+    if strip_sources:
+        text = _SOURCES_STRIP_RE.sub("", text)
     text = _THINK_TAG_RE.sub("", text).strip()
-    text = _INLINE_BASE64_IMG_RE.sub("[图片]", text)
-    return text
+    return _INLINE_BASE64_IMG_RE.sub("[图片]", text)
 
 
 def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
@@ -255,9 +313,13 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
                 parts.append(f"[assistant]:\n{xml}")
             continue
 
+        # ── 剥离前轮 assistant 消息中 grok2api 注入的 Sources 段落 ────────────
+        if role == "assistant" and isinstance(content, str):
+            content = _strip_generated_artifacts(content, strip_sources=True)
+
         # ── normal content handling ───────────────────────────────────────────
         if isinstance(content, str):
-            cleaned = _strip_think_and_inline_images(content.strip())
+            cleaned = _strip_generated_artifacts(content.strip())
             if cleaned:
                 parts.append(f"[{role}]: {cleaned}")
         elif isinstance(content, list):
@@ -266,7 +328,11 @@ def _extract_message(messages: list[dict]) -> tuple[str, list[str]]:
                     continue
                 btype = block.get("type")
                 if btype == "text":
-                    text = _strip_think_and_inline_images((block.get("text") or "").strip())
+                    text = block.get("text") or ""
+                    text = _strip_generated_artifacts(
+                        text.strip(),
+                        strip_sources=(role == "assistant"),
+                    )
                     if text:
                         parts.append(f"[{role}]: {text}")
                 elif btype == "image_url":
@@ -330,13 +396,18 @@ async def _stream_chat(
     session_kwargs = build_session_kwargs(lease=lease)
 
     async with ResettableSession(**session_kwargs) as session:
-        response = await session.post(
-            CHAT,
-            headers=headers,
-            data=payload_bytes,
-            timeout=timeout_s,
-            stream=True,
-        )
+        try:
+            response = await session.post(
+                CHAT,
+                headers=headers,
+                data=payload_bytes,
+                timeout=timeout_s,
+                stream=True,
+            )
+        except Exception as exc:
+            raise _transport_upstream_error(
+                exc, context="Chat transport failed"
+            ) from exc
 
         if response.status_code != 200:
             try:
@@ -349,8 +420,13 @@ async def _stream_chat(
                 body=body,
             )
 
-        async for line in response.aiter_lines():
-            yield line
+        try:
+            async for line in response.aiter_lines():
+                yield line
+        except Exception as exc:
+            raise _transport_upstream_error(
+                exc, context="Chat stream read failed"
+            ) from exc
 
 
 async def completions(
@@ -373,7 +449,6 @@ async def completions(
     """
     cfg = get_config()
     spec = resolve_model(model)
-    mode_id = int(spec.mode_id)  # cast once, reuse everywhere
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", True)
     emit_think = (
         thinking if thinking is not None else cfg.get_bool("features.thinking", True)
@@ -415,9 +490,9 @@ async def completions(
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
             for attempt in range(max_retries + 1):
-                acct = await directory.reserve(
-                    pool_candidates=spec.pool_candidates(),
-                    mode_id=mode_id,
+                acct, selected_mode_id = await reserve_account(
+                    directory,
+                    spec,
                     now_s_override=now_s(),
                     exclude_tokens=excluded or None,
                 )
@@ -429,6 +504,7 @@ async def completions(
                 _retry = False
                 fail_exc: BaseException | None = None
                 adapter = StreamAdapter()
+                collected_annotations: list[dict] = []
 
                 try:
                     try:
@@ -437,7 +513,7 @@ async def completions(
                         tool_calls_emitted = False
                         async for line in _stream_chat(
                             token=token,
-                            mode_id=spec.mode_id,
+                            mode_id=ModeId(selected_mode_id),
                             message=message,
                             files=files,
                             tool_overrides=tool_overrides,
@@ -499,6 +575,8 @@ async def completions(
                                         response_id, model, ev.content
                                     )
                                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                elif ev.kind == "annotation" and ev.annotation_data:
+                                    collected_annotations.append(ev.annotation_data)
                                 elif ev.kind == "soft_stop":
                                     ended = True
                                     break
@@ -523,6 +601,10 @@ async def completions(
                                 done_chunk = make_tool_call_done_chunk(
                                     response_id, model
                                 )
+                                # 注入结构化搜索信源（tool_calls 场景）
+                                sources = adapter.search_sources_list()
+                                if sources:
+                                    done_chunk["search_sources"] = sources
                                 yield f"data: {orjson.dumps(done_chunk).decode()}\n\n"
                                 yield "data: [DONE]\n\n"
                                 tool_calls_emitted = True
@@ -548,9 +630,18 @@ async def completions(
                                 )
                                 yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
+                            chat_anns = _to_chat_annotations(collected_annotations)
                             final = make_stream_chunk(
-                                response_id, model, "", is_final=True
+                                response_id,
+                                model,
+                                "",
+                                is_final=True,
+                                annotations=chat_anns or None,
                             )
+                            # 注入结构化搜索信源到 chunk 根对象（避免 delta strict schema 拒绝）
+                            sources = adapter.search_sources_list()
+                            if sources:
+                                final["search_sources"] = sources
                             yield f"data: {orjson.dumps(final).decode()}\n\n"
                             yield "data: [DONE]\n\n"
                             success = True
@@ -564,7 +655,10 @@ async def completions(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "chat stream retry scheduled: attempt={}/{} status={} token={}...",
@@ -574,6 +668,14 @@ async def completions(
                                 token[:8],
                             )
                         else:
+                            logger.warning(
+                                "chat stream upstream failed: attempt={}/{} model={} status={} body={}",
+                                attempt + 1,
+                                max_retries + 1,
+                                model,
+                                exc.status,
+                                _upstream_body_excerpt(exc),
+                            )
                             raise
 
                 finally:
@@ -585,14 +687,16 @@ async def completions(
                         if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, mode_id, now_s_val=now_s())
+                    await directory.feedback(
+                        token, kind, selected_mode_id, now_s_val=now_s()
+                    )
                     if success:
                         asyncio.create_task(
-                            _quota_sync(token, mode_id)
+                            _quota_sync(token, selected_mode_id)
                         ).add_done_callback(_log_task_exception)
                     else:
                         asyncio.create_task(
-                            _fail_sync(token, mode_id, fail_exc)
+                            _fail_sync(token, selected_mode_id, fail_exc)
                         ).add_done_callback(_log_task_exception)
 
                 if success or not _retry:
@@ -606,9 +710,9 @@ async def completions(
     token = ""
     adapter = StreamAdapter()
     for attempt in range(max_retries + 1):
-        acct = await directory.reserve(
-            pool_candidates=spec.pool_candidates(),
-            mode_id=mode_id,
+        acct, selected_mode_id = await reserve_account(
+            directory,
+            spec,
             now_s_override=now_s(),
             exclude_tokens=excluded or None,
         )
@@ -625,7 +729,7 @@ async def completions(
             try:
                 async for line in _stream_chat(
                     token=token,
-                    mode_id=spec.mode_id,
+                    mode_id=ModeId(selected_mode_id),
                     message=message,
                     files=files,
                     tool_overrides=tool_overrides,
@@ -658,6 +762,14 @@ async def completions(
                         token[:8],
                     )
                 else:
+                    logger.warning(
+                        "chat upstream failed: attempt={}/{} model={} status={} body={}",
+                        attempt + 1,
+                        max_retries + 1,
+                        model,
+                        exc.status,
+                        _upstream_body_excerpt(exc),
+                    )
                     raise
 
         finally:
@@ -669,14 +781,14 @@ async def completions(
                 if fail_exc
                 else FeedbackKind.SERVER_ERROR
             )
-            await directory.feedback(token, kind, mode_id, now_s_val=now_s())
+            await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
             if success:
-                asyncio.create_task(_quota_sync(token, mode_id)).add_done_callback(
-                    _log_task_exception
-                )
+                asyncio.create_task(
+                    _quota_sync(token, selected_mode_id)
+                ).add_done_callback(_log_task_exception)
             else:
                 asyncio.create_task(
-                    _fail_sync(token, mode_id, fail_exc)
+                    _fail_sync(token, selected_mode_id, fail_exc)
                 ).add_done_callback(_log_task_exception)
 
         if success or not _retry:
@@ -715,13 +827,18 @@ async def completions(
                 len(parse_result.calls),
             )
             pt = estimate_prompt_tokens(message)
-            return make_tool_call_response(
+            resp = make_tool_call_response(
                 model,
                 parse_result.calls,
                 prompt_content=message,
                 response_id=response_id,
                 usage=build_usage(pt, estimate_tool_call_tokens(parse_result.calls)),
             )
+            # 注入结构化搜索信源（tool_calls 场景）
+            sources = adapter.search_sources_list()
+            if sources:
+                resp["search_sources"] = sources
+            return resp
 
     logger.info(
         "chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
@@ -736,12 +853,15 @@ async def completions(
     pt = estimate_prompt_tokens(message)
     ct = estimate_tokens(full_text)
     rt = estimate_tokens(thinking_text) if thinking_text else 0
+    chat_anns = _to_chat_annotations(adapter.annotations_list())
     return make_chat_response(
         model,
         full_text,
         prompt_content=message,
         response_id=response_id,
         reasoning_content=thinking_text,
+        search_sources=adapter.search_sources_list(),
+        annotations=chat_anns or None,
         usage=build_usage(pt, ct + rt, reasoning_tokens=rt),
     )
 

@@ -1,4 +1,4 @@
-<img width="9936" height="2538" alt="图片20260409204656" src="https://github.com/user-attachments/assets/794a713b-eb78-4f09-9ec1-ac122d6ca2f9" />
+<img alt="Grok2API" src="https://github.com/user-attachments/assets/037a0a6e-7986-41cc-b4af-04df612ee886" />
 
 [![Python](https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.119%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)

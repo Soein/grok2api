@@ -91,6 +91,7 @@
       "pageTitle": "Grok2API - ChatKit",
       "voiceLabel": "声音",
       "personalityLabel": "个性",
+      "instructionLabel": "提示",
       "speedLabel": "语速",
       "start": "开始",
       "pause": "暂停",
@@ -399,6 +400,10 @@
           "label": "默认思考输出",
           "desc": "请求未显式指定 thinking 参数时所采用的默认值。启用后将在 reasoning_content 字段返回思考过程。"
         },
+        "autoChatModeFallback": {
+          "label": "AUTO 聊天模式回退",
+          "desc": "AUTO 聊天模型在 auto 额度不可用时，自动尝试 fast 和 expert 聊天额度窗口。"
+        },
         "thinkingSummary": {
           "label": "思考精简输出",
           "desc": "启用后将思考过程提炼为结构化摘要。关闭时输出完整的原始推理过程，支持多 Agent 模型的协作详情与工具调用展示。"
@@ -410,6 +415,10 @@
         "enableNsfw": {
           "label": "允许 NSFW 生成",
           "desc": "允许图像生成接口绕过 NSFW 内容过滤。"
+        },
+        "showSearchSources": {
+          "label": "正文追加信源",
+          "desc": "搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。"
         },
         "customInstruction": {
           "label": "全局附加指令",

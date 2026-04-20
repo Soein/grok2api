@@ -20,6 +20,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -319,6 +320,39 @@ def create_app() -> FastAPI:
     @app.exception_handler(AppError)
     async def _app_error_handler(request: Request, exc: AppError):
         return JSONResponse(exc.to_dict(), status_code=exc.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ):
+        errors = exc.errors()
+        first = errors[0] if errors else {}
+        loc = tuple(first.get("loc") or ())
+        param_parts = [
+            str(part)
+            for part in loc
+            if str(part) not in {"body", "query", "path", "header", "cookie"}
+        ]
+        param = ".".join(param_parts)
+        message = first.get("msg") or "Request validation failed"
+        logger.warning(
+            "request validation failed: method={} path={} param={} errors={}",
+            request.method,
+            request.url.path,
+            param or "-",
+            errors,
+        )
+        payload = {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+            }
+        }
+        if param:
+            payload["error"]["param"] = param
+        return JSONResponse(payload, status_code=400)
 
     @app.exception_handler(Exception)
     async def _generic_error_handler(request: Request, exc: Exception):

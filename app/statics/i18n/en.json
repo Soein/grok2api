@@ -91,6 +91,7 @@
       "pageTitle": "Grok2API - ChatKit",
       "voiceLabel": "Voice",
       "personalityLabel": "Personality",
+      "instructionLabel": "Prompt",
       "speedLabel": "Speed",
       "start": "Start",
       "pause": "Pause",
@@ -399,6 +400,10 @@
           "label": "Default Reasoning Output",
           "desc": "Default value applied when the request does not explicitly provide the thinking parameter. When enabled, reasoning steps are returned in reasoning_content."
         },
+        "autoChatModeFallback": {
+          "label": "AUTO Chat Mode Fallback",
+          "desc": "When an AUTO chat model has no available auto quota, automatically try the fast and expert chat quota windows."
+        },
         "thinkingSummary": {
           "label": "Condensed Reasoning",
           "desc": "When enabled, reasoning steps are condensed into a structured summary. When disabled, the full raw reasoning stream is output, with multi-agent collaboration details and tool call traces."
@@ -410,6 +415,10 @@
         "enableNsfw": {
           "label": "Allow NSFW Generation",
           "desc": "Permits the image generation endpoint to bypass NSFW content filtering."
+        },
+        "showSearchSources": {
+          "label": "Append Sources to Content",
+          "desc": "Search sources are always output in the search_sources field. This option controls whether to also append a ## Sources section to the response content (for backward compatibility with text-parsing clients)."
         },
         "customInstruction": {
           "label": "Global Supplemental Instruction",

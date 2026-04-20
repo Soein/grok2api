@@ -382,9 +382,11 @@ const SCHEMA_DEF = [
           { key: 'memory', label: '开启会话记忆', labelKey: 'config.schema.fields.memory.label', type: 'bool', desc: '启用 Grok Memory，允许模型跨会话记忆用户偏好与上下文。', descKey: 'config.schema.fields.memory.desc' },
           { key: 'stream', label: '默认流式输出', labelKey: 'config.schema.fields.stream.label', type: 'bool', desc: '请求未显式指定 stream 参数时所采用的默认值。', descKey: 'config.schema.fields.stream.desc' },
           { key: 'thinking', label: '默认思考输出', labelKey: 'config.schema.fields.thinking.label', type: 'bool', desc: '请求未显式指定 thinking 参数时所采用的默认值。启用后将在 reasoning_content 字段返回思考过程。', descKey: 'config.schema.fields.thinking.desc' },
+          { key: 'auto_chat_mode_fallback', label: 'AUTO 聊天模式回退', labelKey: 'config.schema.fields.autoChatModeFallback.label', type: 'bool', desc: 'AUTO 聊天模型在 auto 额度不可用时，自动尝试 fast 和 expert 聊天额度窗口。', descKey: 'config.schema.fields.autoChatModeFallback.desc' },
           { key: 'thinking_summary', label: '思考精简输出', labelKey: 'config.schema.fields.thinkingSummary.label', type: 'bool', desc: '启用后将思考过程提炼为结构化摘要。关闭时输出完整的原始推理过程，支持多 Agent 模型的协作详情与工具调用展示。', descKey: 'config.schema.fields.thinkingSummary.desc' },
           { key: 'dynamic_statsig', label: '动态 Statsig', labelKey: 'config.schema.fields.dynamicStatsig.label', type: 'bool', desc: '为每次请求动态生成 Statsig 设备指纹，以降低风控拦截概率。', descKey: 'config.schema.fields.dynamicStatsig.desc' },
           { key: 'enable_nsfw', label: '允许 NSFW 生成', labelKey: 'config.schema.fields.enableNsfw.label', type: 'bool', desc: '允许图像生成接口绕过 NSFW 内容过滤。', descKey: 'config.schema.fields.enableNsfw.desc' },
+          { key: 'show_search_sources', label: '正文追加信源', labelKey: 'config.schema.fields.showSearchSources.label', type: 'bool', desc: '搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。', descKey: 'config.schema.fields.showSearchSources.desc' },
           { key: 'custom_instruction', label: '全局附加指令', labelKey: 'config.schema.fields.customInstruction.label', type: 'textarea', desc: '为每次请求注入统一的 system 消息，用于约束模型行为或固定角色设定。', descKey: 'config.schema.fields.customInstruction.desc' },
         ]
       },

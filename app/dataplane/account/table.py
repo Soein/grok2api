@@ -17,10 +17,10 @@ from ..shared.enums import ALL_MODE_IDS, POOL_STR_TO_ID, STATUS_STR_TO_ID, PoolI
 # ---------------------------------------------------------------------------
 # Column type codes
 #   'B'  uint8   — pool_id, status_id
-#   'h'  int16   — quota remaining (max 32767; sufficient for all known limits)
+#   'h'  int16   — quota remaining / total (max 32767; sufficient for all known limits)
 #   'H'  uint16  — inflight, fail_count
 #   'f'  float32 — health score
-#   'L'  uint32  — epoch-second timestamps (valid until year 2106)
+#   'L'  uint32  — epoch-second timestamps / window lengths (valid until year 2106)
 # ---------------------------------------------------------------------------
 
 _QUOTA_COLS  = ("quota_auto", "quota_fast", "quota_expert", "quota_heavy")
@@ -55,6 +55,18 @@ class AccountRuntimeTable:
     quota_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("h"))
     quota_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("h"))
 
+    # --- Quota total per mode (int16; 0 = unsupported / unknown) ---
+    total_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    total_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    total_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("h"))
+    total_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("h"))
+
+    # --- Window size per mode (uint32 seconds; 0 = unsupported / unknown) ---
+    window_auto_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    window_fast_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    window_expert_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
+    window_heavy_by_idx:  "array.array[int]" = field(default_factory=lambda: array.array("L"))
+
     # --- Window reset timestamps (uint32 epoch-seconds; 0 = unknown) ---
     reset_auto_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
     reset_fast_at_by_idx:   "array.array[int]" = field(default_factory=lambda: array.array("L"))
@@ -73,7 +85,7 @@ class AccountRuntimeTable:
     last_fail_at_by_idx: "array.array[int]" = field(default_factory=lambda: array.array("L"))
 
     # --- Pre-computed selection indexes ---
-    # (pool_id, mode_id) → set of idx with quota > 0 and status == ACTIVE
+    # (pool_id, mode_id) → set of idx with a supported quota window and status == ACTIVE
     mode_available: dict[tuple[int, int], set[int]] = field(default_factory=dict)
     # tag string → set of idx
     tag_idx: dict[str, set[int]] = field(default_factory=dict)
@@ -98,13 +110,25 @@ class AccountRuntimeTable:
         if mode_id == 2: return self.reset_expert_at_by_idx
         return self.reset_heavy_at_by_idx
 
+    def _total_col(self, mode_id: int) -> "array.array[int]":
+        if mode_id == 0: return self.total_auto_by_idx
+        if mode_id == 1: return self.total_fast_by_idx
+        if mode_id == 2: return self.total_expert_by_idx
+        return self.total_heavy_by_idx
+
+    def _window_col(self, mode_id: int) -> "array.array[int]":
+        if mode_id == 0: return self.window_auto_by_idx
+        if mode_id == 1: return self.window_fast_by_idx
+        if mode_id == 2: return self.window_expert_by_idx
+        return self.window_heavy_by_idx
+
     def _add_to_indexes(self, idx: int) -> None:
         pool_id   = int(self.pool_by_idx[idx])
         status_id = int(self.status_by_idx[idx])
         if status_id != int(StatusId.ACTIVE):
             return
         for mode_id in ALL_MODE_IDS:
-            if self._quota_col(mode_id)[idx] > 0:
+            if self._window_col(mode_id)[idx] > 0:
                 self.mode_available.setdefault((pool_id, mode_id), set()).add(idx)
 
     def _remove_from_indexes(self, idx: int) -> None:
@@ -137,6 +161,14 @@ class AccountRuntimeTable:
         quota_fast:   int,
         quota_expert: int,
         quota_heavy:  int,
+        total_auto:   int,
+        total_fast:   int,
+        total_expert: int,
+        total_heavy:  int,
+        window_auto:  int,
+        window_fast:  int,
+        window_expert: int,
+        window_heavy: int,
         reset_auto:   int,
         reset_fast:   int,
         reset_expert: int,
@@ -156,6 +188,14 @@ class AccountRuntimeTable:
         self.quota_fast_by_idx.append(max(-1, min(quota_fast, 32767)))
         self.quota_expert_by_idx.append(max(-1, min(quota_expert, 32767)))
         self.quota_heavy_by_idx.append(max(-1, min(quota_heavy, 32767)))
+        self.total_auto_by_idx.append(max(0, min(total_auto, 32767)))
+        self.total_fast_by_idx.append(max(0, min(total_fast, 32767)))
+        self.total_expert_by_idx.append(max(0, min(total_expert, 32767)))
+        self.total_heavy_by_idx.append(max(0, min(total_heavy, 32767)))
+        self.window_auto_by_idx.append(max(0, window_auto))
+        self.window_fast_by_idx.append(max(0, window_fast))
+        self.window_expert_by_idx.append(max(0, window_expert))
+        self.window_heavy_by_idx.append(max(0, window_heavy))
         self.reset_auto_at_by_idx.append(reset_auto)
         self.reset_fast_at_by_idx.append(reset_fast)
         self.reset_expert_at_by_idx.append(reset_expert)
@@ -183,6 +223,14 @@ class AccountRuntimeTable:
         quota_fast:   int,
         quota_expert: int,
         quota_heavy:  int,
+        total_auto:   int,
+        total_fast:   int,
+        total_expert: int,
+        total_heavy:  int,
+        window_auto:  int,
+        window_fast:  int,
+        window_expert: int,
+        window_heavy: int,
         reset_auto:   int,
         reset_fast:   int,
         reset_expert: int,
@@ -203,6 +251,14 @@ class AccountRuntimeTable:
         self.quota_fast_by_idx[idx]       = max(-1, min(quota_fast, 32767))
         self.quota_expert_by_idx[idx]     = max(-1, min(quota_expert, 32767))
         self.quota_heavy_by_idx[idx]      = max(-1, min(quota_heavy, 32767))
+        self.total_auto_by_idx[idx]       = max(0, min(total_auto, 32767))
+        self.total_fast_by_idx[idx]       = max(0, min(total_fast, 32767))
+        self.total_expert_by_idx[idx]     = max(0, min(total_expert, 32767))
+        self.total_heavy_by_idx[idx]      = max(0, min(total_heavy, 32767))
+        self.window_auto_by_idx[idx]      = max(0, window_auto)
+        self.window_fast_by_idx[idx]      = max(0, window_fast)
+        self.window_expert_by_idx[idx]    = max(0, window_expert)
+        self.window_heavy_by_idx[idx]     = max(0, window_heavy)
         self.reset_auto_at_by_idx[idx]    = reset_auto
         self.reset_fast_at_by_idx[idx]    = reset_fast
         self.reset_expert_at_by_idx[idx]  = reset_expert

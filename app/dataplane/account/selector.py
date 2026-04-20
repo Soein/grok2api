@@ -38,11 +38,24 @@ def select(
     # Apply window-expiry resets for basic accounts inline.
     reset_col = table._reset_col(mode_id)
     quota_col = table._quota_col(mode_id)
-    _maybe_reset_windows(table, candidates, mode_id, reset_col, quota_col, pool_id, now_s)
+    total_col = table._total_col(mode_id)
+    window_col = table._window_col(mode_id)
+    _maybe_reset_windows(
+        table,
+        candidates,
+        mode_id,
+        reset_col,
+        quota_col,
+        total_col,
+        window_col,
+        pool_id,
+        now_s,
+    )
 
     working: set[int] = candidates.copy()
     if exclude_idxs:
         working -= exclude_idxs
+    working = {idx for idx in working if int(quota_col[idx]) > 0}
     if not working:
         return None
 
@@ -60,6 +73,8 @@ def _maybe_reset_windows(
     mode_id:   int,
     reset_col: "array.array",
     quota_col: "array.array",
+    total_col: "array.array",
+    window_col: "array.array",
     pool_id:   int,
     now_s:     int,
 ) -> None:
@@ -71,29 +86,19 @@ def _maybe_reset_windows(
     if pool_id != int(PoolId.BASIC):
         return
 
-    from app.control.account.quota_defaults import default_quota_window
-
-    defaults = default_quota_window("basic", mode_id)
-    if defaults is None:
-        return
-    add_back: list[int] = []
-
     for idx in list(candidates):
         r = reset_col[idx]
         if r == 0 or now_s < r:
             continue
         if int(table.pool_by_idx[idx]) != pool_id:
             continue
-        # Window expired — restore default quota.
-        new_total = defaults.total
+        new_total = int(total_col[idx])
+        window_s = int(window_col[idx])
+        if new_total <= 0 or window_s <= 0:
+            continue
+        # Window expired — restore the last known total for this account/mode.
         quota_col[idx] = new_total
-        reset_col[idx] = now_s + defaults.window_seconds
-        add_back.append(idx)
-
-    # Re-add to the availability index (may have been removed when quota hit 0).
-    bucket = table.mode_available.get((pool_id, mode_id))
-    if bucket is not None:
-        bucket.update(add_back)
+        reset_col[idx] = now_s + window_s
 
 
 def _best(
@@ -114,6 +119,8 @@ def _best(
 
     for idx in working:
         quota    = int(quota_col[idx])
+        if quota <= 0:
+            continue
         health   = float(health_col[idx])
         inflight = int(inflight_col[idx])
         fails    = min(int(fail_col[idx]), 10)
@@ -134,7 +141,7 @@ def _best(
             best_score = score
             best_idx   = idx
 
-    return best_idx
+    return best_idx if best_idx >= 0 else None
 
 
 __all__ = ["select"]

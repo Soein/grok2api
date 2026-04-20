@@ -27,22 +27,11 @@ def apply_success(table: AccountRuntimeTable, idx: int, mode_id: int) -> None:
     h = min(_MAX_HEALTH, float(table.health_by_idx[idx]) + _SUCCESS_STEP)
     table.health_by_idx[idx] = h
 
-    # Remove from availability index if quota exhausted.
-    if new_q == 0:
-        pool_id = int(table.pool_by_idx[idx])
-        bucket = table.mode_available.get((pool_id, mode_id))
-        if bucket:
-            bucket.discard(idx)
-
 
 def apply_rate_limited(table: AccountRuntimeTable, idx: int, mode_id: int) -> None:
     """Zero the mode quota and reduce health."""
     table._quota_col(mode_id)[idx] = 0
     _adjust_health(table, idx, _RATE_LIMIT_FACTOR)
-    pool_id = int(table.pool_by_idx[idx])
-    bucket = table.mode_available.get((pool_id, mode_id))
-    if bucket:
-        bucket.discard(idx)
 
 
 def apply_auth_failure(table: AccountRuntimeTable, idx: int) -> None:
@@ -101,10 +90,8 @@ def apply_quota_update(
     pool_id = int(table.pool_by_idx[idx])
     if int(table.status_by_idx[idx]) == int(StatusId.ACTIVE):
         bucket = table.mode_available.setdefault((pool_id, mode_id), set())
-        if remaining > 0:
+        if int(table._window_col(mode_id)[idx]) > 0:
             bucket.add(idx)
-        else:
-            bucket.discard(idx)
 
 
 def increment_inflight(table: AccountRuntimeTable, idx: int) -> None:
