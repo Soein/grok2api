@@ -33,7 +33,7 @@ from app.products.openai.chat import (
     _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception,
     _configured_retry_codes, _should_retry_upstream,
 )
-from app.products._account_selection import reserve_account
+from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai._tool_sieve import ToolSieve
 
 
@@ -310,7 +310,7 @@ async def create(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = cfg.get_int("retry.max_retries", 1)
+    max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
     timeout_s   = cfg.get_float("chat.timeout", 120.0)
     msg_id      = _make_msg_id()

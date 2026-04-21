@@ -8,16 +8,17 @@ changesets without holding the selection lock.
 import asyncio
 from typing import TYPE_CHECKING
 
+from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.control.account.repository import AccountRepository
 from app.control.account.enums import FeedbackKind
 from .table import AccountRuntimeTable
 from .lease import AccountLease, new_lease
-from .selector import select, select_any
+from .selector import current_strategy, select, select_any
 from .sync import bootstrap as _bootstrap, apply_changes
 from . import feedback as fb
-from ..shared.enums import StatusId
+from ..shared.enums import POOL_ID_TO_STR, StatusId
 
 if TYPE_CHECKING:
     pass
@@ -250,12 +251,22 @@ class AccountDirectory:
 
         ts = now_s_val if now_s_val is not None else now_s()
 
+        strategy = current_strategy()
+
         async with self._lock:
             if kind == FeedbackKind.SUCCESS:
-                fb.apply_success(table, idx, mode_id)
+                if strategy == "random":
+                    fb.apply_success_random(table, idx)
+                else:
+                    fb.apply_success_quota(table, idx, mode_id)
 
             elif kind == FeedbackKind.RATE_LIMITED:
-                fb.apply_rate_limited(table, idx, mode_id)
+                if strategy == "random":
+                    pool_id = int(table.pool_by_idx[idx])
+                    cooling_sec = _pool_cooling_sec(pool_id)
+                    fb.apply_rate_limited_random(table, idx, cooling_sec=cooling_sec)
+                else:
+                    fb.apply_rate_limited_quota(table, idx, mode_id)
                 fb.update_last_fail(table, idx, ts)
 
             elif kind == FeedbackKind.UNAUTHORIZED:
@@ -271,8 +282,9 @@ class AccountDirectory:
                 fb.apply_server_error(table, idx)
                 fb.update_last_fail(table, idx, ts)
 
-            # Apply authoritative quota data from upstream response headers.
-            if remaining is not None and reset_at_ms is not None:
+            # Quota strategy may receive authoritative quota data from upstream
+            # response headers; the random strategy ignores this entirely.
+            if strategy == "quota" and remaining is not None and reset_at_ms is not None:
                 reset_s = int(reset_at_ms // 1000)
                 fb.apply_quota_update(table, idx, mode_id, remaining, reset_s)
 
@@ -287,6 +299,27 @@ class AccountDirectory:
     @property
     def revision(self) -> int:
         return self._table.revision if self._table else 0
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_POOL_INTERVAL_CONFIG: dict[str, tuple[str, int]] = {
+    "basic": ("account.refresh.basic_interval_sec", 36_000),
+    "super": ("account.refresh.super_interval_sec", 7_200),
+    "heavy": ("account.refresh.heavy_interval_sec", 7_200),
+}
+
+
+def _pool_cooling_sec(pool_id: int) -> int:
+    """Cooling seconds for a 429 on a given pool (random strategy only)."""
+    pool_str = POOL_ID_TO_STR.get(pool_id, "basic")
+    interval_key, default_interval = _POOL_INTERVAL_CONFIG.get(
+        pool_str, _POOL_INTERVAL_CONFIG["basic"]
+    )
+    return max(0, int(get_config(interval_key, default_interval)))
 
 
 # ---------------------------------------------------------------------------

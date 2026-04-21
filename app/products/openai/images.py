@@ -15,7 +15,7 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
-from app.platform.storage import image_files_dir
+from app.platform.storage import save_local_image
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.model.spec import ModelSpec
@@ -28,7 +28,6 @@ from app.dataplane.reverse.protocol.xai_chat import (
 )
 from app.dataplane.reverse.protocol.xai_assets import infer_content_type, resolve_asset_reference, resolve_download_url
 from app.dataplane.reverse.protocol.xai_image_edit import (
-    IMAGE_EDIT_GENERATION_COUNT,
     IMAGE_POST_MEDIA_TYPE,
     build_image_edit_payload,
     extract_model_response_file_attachments,
@@ -165,12 +164,7 @@ def _extract_image_file_id(url: str) -> str:
 
 
 def _save_image(raw: bytes, mime: str, file_id: str) -> str:
-    img_dir = image_files_dir()
-    ext = ".png" if "png" in mime else ".jpg"
-    path = img_dir / f"{file_id}{ext}"
-    if not path.exists():
-        path.write_bytes(raw)
-    return file_id
+    return save_local_image(raw, mime, file_id)
 
 
 async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
@@ -211,7 +205,12 @@ async def _resolve_image_output(
         data_uri = f"data:{mime};base64,{b64}"
         return _ImageOutput(api_value=b64, markdown_value=f"![image]({data_uri})")
 
-    file_id = _save_image(raw, mime, _extract_image_file_id(url))
+    file_id = await asyncio.to_thread(
+        _save_image,
+        raw,
+        mime,
+        _extract_image_file_id(url),
+    )
     local_url = _local_image_url(file_id)
     return _ImageOutput(api_value=local_url, markdown_value=f"![image]({local_url})")
 

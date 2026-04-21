@@ -27,7 +27,7 @@ from app.platform.errors import (
 )
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
-from app.platform.storage import video_files_dir
+from app.platform.storage import save_local_video
 from app.control.account.enums import FeedbackKind
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
@@ -538,11 +538,7 @@ async def _download_video_bytes(token: str, url: str) -> tuple[bytes, str]:
 
 
 def _save_video_bytes(raw: bytes, file_id: str) -> Path:
-    out_dir = video_files_dir()
-    path = out_dir / f"{file_id}.mp4"
-    if not path.exists():
-        path.write_bytes(raw)
-    return path
+    return save_local_video(raw, file_id)
 
 
 def _local_video_url(file_id: str) -> str:
@@ -580,7 +576,7 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
 
     try:
         raw, _mime = await _download_video_bytes(token, url)
-        _save_video_bytes(raw, file_id)
+        await asyncio.to_thread(_save_video_bytes, raw, file_id)
     except Exception as exc:
         logger.warning("video download failed: fallback_to=upstream_url error={}", exc)
         return url if fmt == "local_url" else _render_video_html(url)

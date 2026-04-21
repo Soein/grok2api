@@ -2,10 +2,10 @@
 
 Canonical quota totals per pool type (from upstream rate-limits API):
 
-              auto    fast    expert    heavy
-  basic         20      60       8        —      window: 72000 / 36000 s
-  super         50     140      50        —      window: 7200 s
-  heavy        150     400     150       20      window: 7200 s
+              auto    fast    expert    heavy    grok_4_3
+  basic         20      60       8        —         —        window: 72000 / 36000 s
+  super         50     140      50        —        50        window: 7200 s
+  heavy        150     400     150       20       150        window: 7200 s
 
 Pool inference uses ``auto.total`` as the primary signal — the three values
 (20 / 50 / 150) are mutually exclusive across pool types.

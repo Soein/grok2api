@@ -60,6 +60,14 @@ image_format = "grok_url"
 video_format = "grok_url"
 
 
+# ==================== 本地缓存 ====================
+[cache.local]
+# 图片缓存上限（MB），0 = 不限制；超限后按最旧文件优先清理，并回落到上限的 60%
+image_max_mb = 0
+# 视频缓存上限（MB），0 = 不限制；超限后按最旧文件优先清理，并回落到上限的 60%
+video_max_mb = 0
+
+
 # ==================== 代理配置 ====================
 [proxy.egress]
 # 出口模式：direct | single_proxy | proxy_pool
@@ -103,11 +111,18 @@ on_codes = "429,401,503"
 
 
 [account.refresh]
-basic_interval_sec = 36000   # basic 号池刷新周期（秒），默认 10 h
-super_interval_sec = 7200    # super 号池刷新周期（秒），默认 2 h
-heavy_interval_sec = 7200    # heavy 号池刷新周期（秒），默认 2 h
+# 总开关：true=配额刷新模式（主动探测，选号评分）；false=自动重试模式（随机选号，零探测）
+enabled = true
+basic_interval_sec = 36000   # basic 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 36000s
+super_interval_sec = 7200    # super 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
+heavy_interval_sec = 7200    # heavy 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
 usage_concurrency = 50
 on_demand_min_interval_sec = 300
+
+
+[account.selection]
+# 单号并发上限（两模式共用）
+max_inflight = 8
 
 
 # ==================== 对话配置 ====================

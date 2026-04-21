@@ -18,7 +18,7 @@ from app.control.model.enums import ModeId
 from app.control.model.registry import resolve as resolve_model
 from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
-from app.products._account_selection import reserve_account
+from app.products._account_selection import reserve_account, selection_max_retries
 
 from .chat import _stream_chat, _extract_message, _resolve_image, _quota_sync, _fail_sync, _parse_retry_codes, _feedback_kind, _log_task_exception, _upstream_body_excerpt
 from .chat import _configured_retry_codes, _should_retry_upstream
@@ -247,7 +247,7 @@ async def create(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries  = cfg.get_int("retry.max_retries", 1)
+    max_retries  = selection_max_retries()
     retry_codes  = _configured_retry_codes(cfg)
     response_id  = make_resp_id("resp")
     reasoning_id = make_resp_id("rs")

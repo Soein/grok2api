@@ -175,7 +175,7 @@ docker compose up -d
 | `SERVER_PORT` | Service port | `8000` |
 | `SERVER_WORKERS` | Granian worker count | `1` |
 | `HOST_PORT` | Docker Compose published host port | `8000` |
-| `DATA_DIR` | Local data directory | `./data` |
+| `DATA_DIR` | Local data root for accounts, locally cached media files, and cache indexes | `./data` |
 | `LOG_DIR` | Local log directory | `./logs` |
 | `ACCOUNT_STORAGE` | Account storage backend | `local` |
 | `ACCOUNT_LOCAL_PATH` | SQLite path for `local` account storage | `${DATA_DIR}/accounts.db` |
@@ -201,6 +201,7 @@ Runtime config can also be overridden with `GROK_`-prefixed environment variable
 | `proxy.clearance` | `mode`, `cf_cookies`, `user_agent`, `browser`, `flaresolverr_url`, `timeout_sec`, `refresh_interval` |
 | `retry` | `reset_session_status_codes`, `max_retries`, `on_codes` |
 | `account.refresh` | `basic_interval_sec`, `super_interval_sec`, `heavy_interval_sec`, `usage_concurrency`, `on_demand_min_interval_sec` |
+| `cache.local` | `image_max_mb`, `video_max_mb` |
 | `chat` | `timeout` |
 | `image` | `timeout`, `stream_timeout` |
 | `video` | `timeout` |

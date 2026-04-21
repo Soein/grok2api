@@ -11,17 +11,18 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
+from app.platform.storage import save_local_image
 from app.platform.tokens import (
     estimate_prompt_tokens,
     estimate_tokens,
     estimate_tool_call_tokens,
 )
-from app.platform.storage import image_files_dir
 from app.control.account.runtime import get_refresh_service
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.account.enums import FeedbackKind
+from app.dataplane.account.selector import current_strategy
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.session import (
@@ -54,7 +55,7 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
-from app.products._account_selection import reserve_account
+from app.products._account_selection import reserve_account, selection_max_retries
 
 
 def _to_chat_annotations(anns: list[dict]) -> list[dict]:
@@ -106,6 +107,8 @@ def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamEr
 async def _quota_sync(token: str, mode_id: int) -> None:
     """Fire-and-forget: fetch real quota after a successful call."""
     try:
+        if current_strategy() != "quota":
+            return
         svc = get_refresh_service()
         if svc:
             await svc.refresh_call_async(token, mode_id)
@@ -121,12 +124,20 @@ async def _quota_sync(token: str, mode_id: int) -> None:
 async def _fail_sync(
     token: str, mode_id: int, exc: BaseException | None = None
 ) -> None:
-    """Fire-and-forget: persist failure counter after a failed call."""
+    """Fire-and-forget: persist failure metadata after a failed call.
+
+    In random mode this helper must not trigger upstream quota probes. It still
+    records failures so 401 invalidation and local failure accounting continue
+    to work unchanged.
+    """
     try:
         svc = get_refresh_service()
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
-            if getattr(exc, "status", None) == 429:
+            if (
+                current_strategy() == "quota"
+                and getattr(exc, "status", None) == 429
+            ):
                 result = await svc.refresh_on_demand()
                 logger.info(
                     "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
@@ -199,12 +210,7 @@ async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
 
 def _save_image(raw: bytes, mime: str, image_id: str) -> str:
     """Save raw bytes to ``${DATA_DIR}/files/images`` and return the file ID."""
-    img_dir = image_files_dir()
-    ext = ".png" if "png" in mime else ".jpg"
-    path = img_dir / f"{image_id}{ext}"
-    if not path.exists():
-        path.write_bytes(raw)
-    return image_id
+    return save_local_image(raw, mime, image_id)
 
 
 async def _resolve_image(token: str, url: str, image_id: str) -> str:
@@ -240,7 +246,7 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
         return f"![image](data:{mime};base64,{b64})"
 
     # local_url / local_md: save to disk and return local path
-    file_id = _save_image(raw, mime, image_id)
+    file_id = await asyncio.to_thread(_save_image, raw, mime, image_id)
     app_url = cfg.get_str("app.app_url", "").rstrip("/")
     local_url = (
         f"{app_url}/v1/files/image?id={file_id}"
@@ -470,7 +476,7 @@ async def completions(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = cfg.get_int("retry.max_retries", 1)
+    max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
     timeout_s = cfg.get_float("chat.timeout", 120.0)

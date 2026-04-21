@@ -151,6 +151,11 @@ class AccountRuntimeTable:
         default_factory=lambda: array.array("L")
     )
 
+    # --- Per-account cooldown (random strategy only; uint32 epoch-seconds; 0 = not cooling) ---
+    cooling_until_s_by_idx: "array.array[int]" = field(
+        default_factory=lambda: array.array("L")
+    )
+
     # --- Pre-computed selection indexes ---
     # (pool_id, mode_id) → set of idx with a supported quota window and status == ACTIVE
     mode_available: dict[tuple[int, int], set[int]] = field(default_factory=dict)
@@ -300,6 +305,7 @@ class AccountRuntimeTable:
         self.health_by_idx.append(health)
         self.last_use_at_by_idx.append(last_use_s)
         self.last_fail_at_by_idx.append(last_fail_s)
+        self.cooling_until_s_by_idx.append(0)
         self.size += 1
         self._add_to_indexes(idx)
         self._add_to_tag_idx(idx, tags)
