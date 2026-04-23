@@ -523,10 +523,27 @@ class SqlAccountRepository:
         """Idempotent ALTER TABLE migrations for columns added after the initial schema."""
         existing = await self._table_columns(conn, _TBL_ACCOUNTS)
         if "quota_grok_4_3" not in existing:
-            await conn.exec_driver_sql(
-                f"ALTER TABLE {_TBL_ACCOUNTS} "
-                f"ADD COLUMN quota_grok_4_3 TEXT NOT NULL DEFAULT '{{}}'"
-            )
+            if self._dialect == "mysql":
+                # MySQL forbids DEFAULT values on TEXT/BLOB columns;
+                # add as nullable, backfill, then promote to NOT NULL.
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"ADD COLUMN quota_grok_4_3 TEXT"
+                )
+                await conn.exec_driver_sql(
+                    f"UPDATE {_TBL_ACCOUNTS} "
+                    f"SET quota_grok_4_3 = '{{}}' "
+                    f"WHERE quota_grok_4_3 IS NULL"
+                )
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"MODIFY COLUMN quota_grok_4_3 TEXT NOT NULL"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"ADD COLUMN quota_grok_4_3 TEXT NOT NULL DEFAULT '{{}}'"
+                )
 
     async def _table_columns(self, conn: Any, table: str) -> set[str]:
         if self._dialect == "postgresql":
