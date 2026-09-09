@@ -43,6 +43,13 @@ import { getClientKeySecret, listClientKeys, type ClientKeyDTO } from "@/feature
 import { importVideoInputFromURL, uploadMediaInput } from "@/features/media/media-api";
 import { PageHeader } from "@/shared/components/page-header";
 import { cn } from "@/shared/lib/cn";
+import {
+  filterVoiceModels,
+  resolveActiveModel,
+  shouldSynchronizeActiveModel,
+  uniqueModelsByPublicID,
+  updateSelectedModel,
+} from "./model-selection";
 
 type CreativeMode = "chat" | "image" | "video" | "voice";
 type ConversationMessage = ChatMessage & {
@@ -142,10 +149,10 @@ export function CreativeConsolePage() {
   }), [permittedModels]);
   const voiceModelChoices = useMemo(() => uniqueModelsByPublicID(modelGroups.voice), [modelGroups.voice]);
   const effectiveModels = useMemo<Record<CreativeMode, string>>(() => ({
-    chat: modelGroups.chat.some((model) => model.publicId === selectedModels.chat) ? selectedModels.chat : modelGroups.chat[0]?.publicId ?? "",
-    image: modelGroups.image.some((model) => model.publicId === selectedModels.image) ? selectedModels.image : modelGroups.image[0]?.publicId ?? "",
-    video: modelGroups.video.some((model) => model.publicId === selectedModels.video) ? selectedModels.video : modelGroups.video[0]?.publicId ?? "",
-    voice: voiceModelChoices.some((model) => model.publicId === selectedModels.voice) ? selectedModels.voice : voiceModelChoices[0]?.publicId ?? "",
+    chat: resolveActiveModel(modelGroups.chat, selectedModels.chat),
+    image: resolveActiveModel(modelGroups.image, selectedModels.image),
+    video: resolveActiveModel(modelGroups.video, selectedModels.video),
+    voice: resolveActiveModel(voiceModelChoices, selectedModels.voice),
   }), [modelGroups, selectedModels, voiceModelChoices]);
 
   const secretMutation = useMutation({
@@ -179,7 +186,7 @@ export function CreativeConsolePage() {
       apiKey,
       model: effectiveModels[panelMode],
       modelOptions: modelGroups[panelMode],
-      onModelChange: (model) => setSelectedModels((current) => ({ ...current, [panelMode]: model })),
+      onModelChange: (model) => setSelectedModels((current) => updateSelectedModel(current, panelMode, model)),
     };
   }
 
@@ -190,7 +197,13 @@ export function CreativeConsolePage() {
   }
 
   return (
-    <div className="flex h-[calc(100dvh-5rem)] min-h-[36rem] flex-col gap-5 overflow-hidden">
+    <div
+      className="flex h-[calc(100dvh-5rem)] min-h-[36rem] flex-col gap-5 overflow-hidden"
+      data-creative-console
+      data-effective-key-id={effectiveKeyId}
+      data-effective-voice-model={effectiveModels.voice}
+      data-selected-voice-model={selectedModels.voice}
+    >
       <PageHeader title={t("creativeConsole.title")} description={t("creativeConsole.description")} />
 
       <aside className="flex shrink-0 flex-col gap-2 rounded-lg bg-secondary/45 px-4 py-2.5 text-xs leading-5 text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:gap-4">
@@ -216,7 +229,7 @@ export function CreativeConsolePage() {
 
           <div className="flex min-w-0 items-center gap-2">
             <Select value={effectiveKeyId} onValueChange={changeKey} disabled={keysQuery.isPending || activeKeys.length === 0}>
-              <SelectTrigger id="creative-key" className="min-w-0 flex-1 bg-secondary/55 lg:w-64 lg:flex-none" aria-label={t("creativeConsole.clientKey")}>
+              <SelectTrigger id="creative-key" data-selected-key-id={effectiveKeyId} className="min-w-0 flex-1 bg-secondary/55 lg:w-64 lg:flex-none" aria-label={t("creativeConsole.clientKey")}>
                 <SelectValue placeholder={keysQuery.isPending ? t("common.loading") : t("creativeConsole.selectKey")} />
               </SelectTrigger>
               <SelectContent>
@@ -961,12 +974,10 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
     return generateModels.filter((item) => eligiblePublicIDs.has(item.publicId));
   }, [generateModels, modelOptions]);
   const activeModels = action === "generate" ? generateModels : editModels;
-  const activeModel = activeModels.some((item) => item.publicId === model)
-    ? model
-    : activeModels[0]?.publicId ?? "";
+  const activeModel = resolveActiveModel(activeModels, model);
 
   useEffect(() => {
-    if (activeModel && activeModel !== model) onModelChange(activeModel);
+    if (shouldSynchronizeActiveModel(activeModel, model)) onModelChange(activeModel);
   }, [activeModel, model, onModelChange]);
 
   const voicesQuery = useQuery({
@@ -1374,25 +1385,18 @@ function VoicePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const filteredModels = useMemo(() => {
-    const matched = modelOptions.filter((item) => (
-      subMode === "tts"
-        ? item.capability === "tts" || item.capability === "realtime"
-        : item.capability === "stt"
-    ));
-    return uniqueModelsByPublicID(matched);
+    return filterVoiceModels(modelOptions, subMode);
   }, [modelOptions, subMode]);
-  const activeModel = filteredModels.some((item) => item.publicId === model)
-    ? model
-    : filteredModels[0]?.publicId ?? "";
+  const activeModel = resolveActiveModel(filteredModels, model);
 
   useEffect(() => {
-    if (activeModel !== model) onModelChange(activeModel);
+    if (shouldSynchronizeActiveModel(activeModel, model)) onModelChange(activeModel);
   }, [activeModel, model, onModelChange]);
 
   const voicesQuery = useQuery({
     queryKey: ["creative-console", "voices", apiKey, activeModel],
     queryFn: ({ signal }) => listVoices({ apiKey, model: activeModel || "grok-voice-latest", signal }),
-    enabled: Boolean(apiKey) && subMode === "tts",
+    enabled: Boolean(apiKey && activeModel) && subMode === "tts",
     staleTime: 60_000,
   });
   const voices = useMemo(() => voicesQuery.data ?? [], [voicesQuery.data]);
@@ -1516,7 +1520,7 @@ function CompactModelSelect({ value, models, onChange }: { value: string; models
   const { t } = useTranslation();
   return (
     <Select value={value} onValueChange={onChange} disabled={models.length === 0}>
-      <SelectTrigger className="h-8 w-auto max-w-56 gap-1 border-0 bg-transparent px-2 shadow-none hover:bg-secondary/70 focus:bg-secondary/70 focus:ring-0" aria-label={t("creativeConsole.model")}>
+      <SelectTrigger className="h-8 w-auto max-w-56 gap-1 border-0 bg-transparent px-2 shadow-none hover:bg-secondary/70 focus:bg-secondary/70 focus:ring-0" aria-label={t("creativeConsole.model")} data-selected-model={value}>
         <SelectValue placeholder={models.length === 0 ? t("creativeConsole.noModels") : t("creativeConsole.selectModel")} />
       </SelectTrigger>
       <SelectContent>{models.map((item) => <SelectItem key={item.id} value={item.publicId}>{item.publicId}</SelectItem>)}</SelectContent>
@@ -1756,15 +1760,6 @@ function isUsableKey(key: ClientKeyDTO): boolean {
 function validDuration(value: string): boolean {
   const duration = Number(value);
   return Number.isInteger(duration) && duration >= 1 && duration <= 15;
-}
-
-function uniqueModelsByPublicID(models: ModelRouteDTO[]): ModelRouteDTO[] {
-  const seen = new Set<string>();
-  return models.filter((model) => {
-    if (seen.has(model.publicId)) return false;
-    seen.add(model.publicId);
-    return true;
-  });
 }
 
 function isFixedReasoningConsoleModel(model: ModelRouteDTO | undefined): boolean {
