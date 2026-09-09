@@ -15,6 +15,7 @@ const (
 )
 
 const InternalKindQualityGuard = "quality_guard"
+const InternalKindAccountRecovery = "account_recovery"
 
 type ProviderScope uint8
 

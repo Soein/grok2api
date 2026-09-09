@@ -108,8 +108,13 @@ func (q *quotaQueueStub) CancelQuotaRecovery(_ context.Context, accountID uint64
 }
 
 func (q *quotaQueueStub) ClaimDueQuotaRecoveries(_ context.Context, _ time.Time, limit int, lease time.Duration) ([]accountdomain.QuotaRecoveryEvent, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.claimLimit, q.claimLease = limit, lease
-	return q.claimed, nil
+	count := min(limit, len(q.claimed))
+	values := q.claimed[:count]
+	q.claimed = q.claimed[count:]
+	return values, nil
 }
 
 func (q *quotaQueueStub) AckQuotaRecovery(_ context.Context, _ accountdomain.QuotaRecoveryEvent) error {

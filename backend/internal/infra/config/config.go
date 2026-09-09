@@ -51,6 +51,7 @@ const (
 const unlimitedRoutingAttempts = -1
 
 var buildForbiddenCodePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+var accountRecoveryBuildModelPattern = regexp.MustCompile(`^grok-[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // Config 表示后端运行配置。
 type Config struct {
@@ -68,8 +69,29 @@ type Config struct {
 	Routing           RoutingConfig           `yaml:"routing"`
 	Audit             AuditConfig             `yaml:"audit"`
 	QualityGuard      QualityGuardConfig      `yaml:"qualityGuard"`
+	AccountRecovery   AccountRecoveryConfig   `yaml:"accountRecovery"`
 	ClientKeyDefaults ClientKeyDefaultsConfig `yaml:"clientKeyDefaults"`
 	Accounts          AccountsConfig          `yaml:"-"`
+}
+
+// AccountRecoveryConfig 定义后台账号恢复巡检；所有字段均在重启后生效。
+type AccountRecoveryConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	Interval     Duration `yaml:"interval"`
+	BatchSize    int      `yaml:"batchSize"`
+	Concurrency  int      `yaml:"concurrency"`
+	ProbeTimeout Duration `yaml:"probeTimeout"`
+	Build        bool     `yaml:"build"`
+	Web          bool     `yaml:"web"`
+	Console      bool     `yaml:"console"`
+	// IncludeDisabled 允许后台维护禁用账号；仅有单独授权恢复名单的账号可在额度确认后自动启用。
+	IncludeDisabled bool `yaml:"includeDisabled"`
+	// SSOReauth 使用有效的现有 SSO 恢复 Build 授权，不会刷新已失效的 SSO 本身。
+	SSOReauth         bool     `yaml:"ssoReauth"`
+	ReauthBatchSize   int      `yaml:"reauthBatchSize"`
+	ReauthBackoffBase Duration `yaml:"reauthBackoffBase"`
+	ReauthBackoffMax  Duration `yaml:"reauthBackoffMax"`
+	BuildModels       []string `yaml:"buildModels"`
 }
 
 type ServerConfig struct {
@@ -390,6 +412,9 @@ func Load(path string) (Config, error) {
 	}
 	if err := applyEnvironmentOverrides(&cfg); err != nil {
 		return Config{}, err
+	}
+	for index, model := range cfg.AccountRecovery.BuildModels {
+		cfg.AccountRecovery.BuildModels[index] = strings.TrimSpace(model)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -713,6 +738,9 @@ func (c Config) Validate() error {
 	if err := validateQualityGuardConfig(c.QualityGuard); err != nil {
 		return err
 	}
+	if err := validateAccountRecoveryConfig(c.AccountRecovery); err != nil {
+		return err
+	}
 	if c.ClientKeyDefaults.RPMLimit < 1 || c.ClientKeyDefaults.RPMLimit > clientkeydomain.MaxRPMLimit || c.ClientKeyDefaults.MaxConcurrent < 1 || c.ClientKeyDefaults.MaxConcurrent > clientkeydomain.MaxConcurrent {
 		return errors.New("clientKeyDefaults 超出允许范围")
 	}
@@ -732,6 +760,36 @@ func (c Config) Validate() error {
 	}
 	if len(c.Accounts.BuildForbiddenReauthCodes) == 0 {
 		return errors.New("accounts.buildForbiddenReauthCodes 至少需要一个错误码")
+	}
+	return nil
+}
+
+func validateAccountRecoveryConfig(value AccountRecoveryConfig) error {
+	if value.Interval.Value() < time.Minute || value.Interval.Value() > 24*time.Hour {
+		return errors.New("accountRecovery.interval 必须在 1 分钟到 24 小时之间")
+	}
+	if value.BatchSize < 1 || value.BatchSize > 100 {
+		return errors.New("accountRecovery.batchSize 必须在 1 到 100 之间")
+	}
+	if value.Concurrency < 1 || value.Concurrency > 10 || value.Concurrency > value.BatchSize {
+		return errors.New("accountRecovery.concurrency 必须在 1 到 10 之间且不超过 batchSize")
+	}
+	if value.ProbeTimeout.Value() < 10*time.Second || value.ProbeTimeout.Value() > 2*time.Minute {
+		return errors.New("accountRecovery.probeTimeout 必须在 10 秒到 2 分钟之间")
+	}
+	if value.ReauthBatchSize < 1 || value.ReauthBatchSize > value.BatchSize {
+		return errors.New("accountRecovery.reauthBatchSize 必须至少为 1 且不超过 batchSize")
+	}
+	if value.ReauthBackoffBase.Value() < 5*time.Minute || value.ReauthBackoffMax.Value() < value.ReauthBackoffBase.Value() || value.ReauthBackoffMax.Value() > 7*24*time.Hour {
+		return errors.New("accountRecovery.reauthBackoffBase 必须至少为 5 分钟，reauthBackoffMax 不小于 base 且不超过 7 天")
+	}
+	if len(value.BuildModels) < 1 || len(value.BuildModels) > 8 {
+		return errors.New("accountRecovery.buildModels 必须包含 1 到 8 个 Build 模型")
+	}
+	for _, model := range value.BuildModels {
+		if !accountRecoveryBuildModelPattern.MatchString(model) {
+			return errors.New("accountRecovery.buildModels 必须是以 grok- 开头的原始模型名称，仅允许字母、数字、点、下划线和连字符")
+		}
 	}
 	return nil
 }
@@ -958,6 +1016,12 @@ func defaultConfig() Config {
 				AccountCooldown: Duration(12 * time.Hour), IdleAccountCooldown: Duration(15 * time.Minute),
 				MinEncryptedBytes: 256, EncryptedBytesPerReasoningToken: 4,
 			},
+		},
+		AccountRecovery: AccountRecoveryConfig{
+			Interval: Duration(5 * time.Minute), BatchSize: 10, Concurrency: 1,
+			ProbeTimeout: Duration(90 * time.Second), Build: true, Web: true, Console: true,
+			ReauthBatchSize: 1, ReauthBackoffBase: Duration(time.Hour), ReauthBackoffMax: Duration(24 * time.Hour),
+			BuildModels: []string{"grok-4.5", "grok-4.6"},
 		},
 		ClientKeyDefaults: ClientKeyDefaultsConfig{RPMLimit: clientkeydomain.DefaultRPMLimit, MaxConcurrent: clientkeydomain.DefaultMaxConcurrent},
 		Accounts: AccountsConfig{

@@ -215,6 +215,7 @@ func (session *selectionSession) acquireQuotaProbe(ctx context.Context, excluded
 			}
 			continue
 		}
+		lease.quotaProbeUntil = now.Add(quotaProbeLease)
 		lease.QuotaProbe = true
 		lease.QuotaProbeKind = candidate.QuotaRecovery.Kind
 		lease.Billing = candidate.Billing

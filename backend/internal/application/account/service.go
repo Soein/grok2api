@@ -809,6 +809,13 @@ func (s *Service) BatchUpdate(ctx context.Context, providerValue accountdomain.P
 	if input.Name != nil {
 		return 0, invalidInput("批量更新不支持修改账号名称")
 	}
+	if input.Enabled != nil {
+		if revoker, ok := s.accounts.(repository.RecoveryActivationRevoker); ok {
+			if err := revoker.RevokeRecoveryActivations(ctx, providerValue, ids); err != nil {
+				return 0, mapRepositoryError(err)
+			}
+		}
+	}
 	updated, err := s.accounts.UpdateMany(ctx, providerValue, ids, repository.AccountUpdates{Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent, MinimumRemaining: input.MinimumRemaining})
 	if err != nil {
 		return 0, mapRepositoryError(err)
@@ -2016,16 +2023,9 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 	if value.LinkedAccountID != 0 && strategy == BuildConversionMissing {
 		return value.LinkedAccountID, false, true, nil
 	}
-	linkedBuildSourceKey := ""
 	if value.LinkedAccountID != 0 {
-		linkedBuild, getErr := s.accounts.Get(ctx, value.LinkedAccountID)
-		if getErr != nil {
-			return 0, false, false, mapRepositoryError(getErr)
-		}
-		if linkedBuild.Provider != accountdomain.ProviderBuild || strings.TrimSpace(linkedBuild.SourceKey) == "" {
-			return 0, false, false, fmt.Errorf("已关联 Grok Build 账号身份无效")
-		}
-		linkedBuildSourceKey = linkedBuild.SourceKey
+		result, recoveryErr := s.recoverLinkedBuild(ctx, value.ID, value.LinkedAccountID, false, true, time.Hour, 24*time.Hour)
+		return value.LinkedAccountID, false, result.Skipped, recoveryErr
 	}
 	converter, ok := s.providers.BuildConverter(accountdomain.ProviderWeb)
 	if !ok {
@@ -2040,9 +2040,6 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 	}
 	seed.Provider = accountdomain.ProviderBuild
 	seed.AuthType = accountdomain.AuthTypeOAuth
-	if linkedBuildSourceKey != "" {
-		seed.SourceKey = linkedBuildSourceKey
-	}
 	buildAccount, created, err := s.persistSeed(ctx, seed)
 	if err != nil {
 		return 0, false, false, err
@@ -2281,7 +2278,30 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		}
 		value.BuildRouteMode = *input.BuildRouteMode
 	}
-	updated, err := s.accounts.Update(ctx, value)
+	if input.Enabled != nil {
+		if revoker, ok := s.accounts.(repository.RecoveryActivationRevoker); ok {
+			if err := revoker.RevokeRecoveryActivations(ctx, value.Provider, []uint64{id}); err != nil {
+				return View{}, mapRepositoryError(err)
+			}
+		}
+	}
+	var updated accountdomain.Credential
+	if writer, ok := s.accounts.(repository.AccountManagementWriter); ok {
+		patch := repository.ManagementAccountUpdates{
+			Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent,
+			MinimumRemaining: input.MinimumRemaining, BuildSuperEntitled: input.BuildSuperEntitled,
+			BuildRouteMode: input.BuildRouteMode,
+		}
+		if input.Name != nil {
+			patch.Name = &value.Name
+		}
+		if input.ClearCloudflareCookies || (input.CloudflareCookies != nil && strings.TrimSpace(*input.CloudflareCookies) != "") {
+			patch.EncryptedCloudflareCookie = &value.EncryptedCloudflareCookie
+		}
+		updated, err = writer.UpdateAccountManagement(ctx, id, patch)
+	} else {
+		updated, err = s.accounts.Update(ctx, value)
+	}
 	if err != nil {
 		return View{}, mapRepositoryError(err)
 	}
@@ -2372,18 +2392,7 @@ func (s *Service) MarkReauthRequired(ctx context.Context, id uint64, reason stri
 	if err != nil {
 		return mapRepositoryError(err)
 	}
-	value.AuthStatus = accountdomain.AuthStatusReauthRequired
-	value.LastError = reason
-	if len(value.LastError) > 512 {
-		value.LastError = value.LastError[:512]
-	}
-	if _, err := s.accounts.Update(ctx, value); err != nil {
-		return mapRepositoryError(err)
-	}
-	if s.sticky != nil {
-		_ = s.sticky.DeleteByAccount(ctx, id)
-	}
-	return nil
+	return s.markCredentialReauthRequired(ctx, value, reason)
 }
 
 // markSSOCredentialRejected 在上游明确返回 401 后可靠持久化失效状态。
@@ -2394,7 +2403,7 @@ func (s *Service) markSSOCredentialRejected(ctx context.Context, value accountdo
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), credentialStateWriteTimeout)
 	defer cancel()
-	if err := s.MarkReauthRequired(writeCtx, value.ID, reason); err != nil {
+	if err := s.markCredentialReauthRequired(writeCtx, value, reason); err != nil {
 		s.logger.Error("account_reauth_required_write_failed", "account_id", value.ID, "provider", value.Provider, "error", err)
 		return err
 	}
@@ -2695,13 +2704,13 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 		return
 	}
 	if permanent {
-		if err := s.MarkReauthRequired(ctx, credential.ID, "OAuth refresh failed: "+errorCode); err != nil {
+		if err := s.markCredentialReauthRequired(ctx, credential, "OAuth refresh failed: "+errorCode); err != nil {
 			s.logger.Warn("credential_refresh_reauth_mark_failed", "account_id", credential.ID, "error", err)
 		}
 		return
 	}
 	if requiresReauth {
-		if err := s.MarkReauthRequired(ctx, credential.ID, "OAuth refresh repeatedly rejected without a classifiable error"); err != nil {
+		if err := s.markCredentialReauthRequired(ctx, credential, "OAuth refresh repeatedly rejected without a classifiable error"); err != nil {
 			s.logger.Warn("credential_refresh_unclassified_reauth_mark_failed", "account_id", credential.ID, "error", err)
 			return
 		}
@@ -2769,7 +2778,7 @@ func (s *Service) resolvePermanentRefreshFailure(ctx context.Context, credential
 		return credential, nil, true
 	}
 	if !accessTokenAlive {
-		if err := s.MarkReauthRequired(ctx, credential.ID, permanentRefreshExpiredReason); err != nil {
+		if err := s.markCredentialReauthRequired(ctx, credential, permanentRefreshExpiredReason); err != nil {
 			return accountdomain.Credential{}, err, true
 		}
 	}
@@ -2845,20 +2854,14 @@ func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdo
 
 // ProbePaidQuota 在真实账期到期后执行一次 Billing 探测，不消耗模型额度。
 func (s *Service) ProbePaidQuota(ctx context.Context, value accountdomain.Credential) (bool, error) {
-	latest, billing, err := s.fetchAndSaveBilling(ctx, value.ID)
-	if err != nil {
-		now := time.Now().UTC()
-		next := now.Add(paidProbeRetryInterval)
-		_ = s.accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{AccountID: value.ID, Kind: accountdomain.QuotaRecoveryKindPaid, Status: accountdomain.QuotaRecoveryStatusExhausted, NextProbeAt: &next, UpdatedAt: now})
-		return false, err
-	}
-	if err := s.reconcilePaidQuotaRecovery(ctx, latest, billing, true); err != nil {
-		return false, err
-	}
-	return !billing.IsExhausted(latest.MinimumRemaining), nil
+	return s.probePaidQuota(ctx, value, nil)
 }
 
 func (s *Service) reconcilePaidQuotaRecovery(ctx context.Context, credential accountdomain.Credential, billing accountdomain.Billing, afterProbe bool) error {
+	return s.reconcilePaidQuotaRecoveryWithLease(ctx, credential, billing, afterProbe, nil)
+}
+
+func (s *Service) reconcilePaidQuotaRecoveryWithLease(ctx context.Context, credential accountdomain.Credential, billing accountdomain.Billing, afterProbe bool, leaseUntil *time.Time) error {
 	if !billing.IsPaid() || !billing.IsExhausted(credential.MinimumRemaining) {
 		recovery, err := s.accounts.GetQuotaRecovery(ctx, credential.ID)
 		if errors.Is(err, repository.ErrNotFound) || (err == nil && recovery.Kind != accountdomain.QuotaRecoveryKindPaid) {
@@ -2867,7 +2870,7 @@ func (s *Service) reconcilePaidQuotaRecovery(ctx context.Context, credential acc
 		if err != nil {
 			return err
 		}
-		return s.accounts.ClearQuotaRecovery(ctx, credential.ID)
+		return s.completePaidQuotaRecovery(ctx, credential.ID, leaseUntil)
 	}
 	periodEnd, ok := billing.PeriodEnd()
 	if !ok {
@@ -2879,7 +2882,7 @@ func (s *Service) reconcilePaidQuotaRecovery(ctx context.Context, credential acc
 		next = now.Add(paidProbeRetryInterval)
 	}
 	exhaustedAt := now
-	return s.accounts.SaveQuotaRecovery(ctx, accountdomain.QuotaRecovery{
+	return s.savePaidQuotaRecovery(ctx, leaseUntil, accountdomain.QuotaRecovery{
 		AccountID: credential.ID, Kind: accountdomain.QuotaRecoveryKindPaid, Status: accountdomain.QuotaRecoveryStatusExhausted,
 		ExhaustedAt: &exhaustedAt, NextProbeAt: &next, LastConfirmedAt: &now, UpdatedAt: now,
 	})
@@ -3125,6 +3128,10 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 // second event for the same account and mode. The recovery worker owns the
 // current claim and is responsible for acknowledging or rescheduling it.
 func (s *Service) ProbeQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
+	return s.probeQuotaModeWithPolicy(ctx, id, mode, s.now(), []accountdomain.Provider{accountdomain.ProviderWeb, accountdomain.ProviderConsole}, false, false)
+}
+
+func (s *Service) probeQuotaMode(ctx context.Context, id uint64, mode string) (accountdomain.QuotaWindow, error) {
 	mode = strings.TrimSpace(mode)
 	key := quotaSyncKey(id, mode)
 	result, err, _ := s.quotaSyncs.Do(key, func() (any, error) {
