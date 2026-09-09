@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
 	"github.com/chenyme/grok2api/backend/internal/domain/clientkey"
@@ -493,6 +494,26 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	defer cancel()
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
+	// Queued and recovered jobs must use current key policy, not an unrestricted worker scope.
+	key, err := s.clientKeys.Get(ctx, job.ClientKeyID)
+	if err != nil {
+		if errors.Is(err, clientkeyapp.ErrNotFound) {
+			s.failVideoJob(parent, job, "client_key_unavailable", clientkeyapp.ErrInvalidKey, http.StatusUnauthorized, nil)
+		} else {
+			s.logger.Warn("video_job_key_policy_load_failed", "job_id", job.ID, "error", err)
+			s.deferVideoJob(parent, job)
+		}
+		return
+	}
+	if !key.IsAvailable(time.Now().UTC()) || key.InternalKind != "" {
+		s.failVideoJob(parent, job, "client_key_unavailable", clientkeyapp.ErrInvalidKey, http.StatusUnauthorized, nil)
+		return
+	}
+	accountScope := key.AccountScope()
+	if !s.clientKeys.CanUseModel(key, route.ID) || !accountScope.AllowsProvider(route.Provider) {
+		s.failVideoJob(parent, job, "model_not_allowed", clientkeyapp.ErrModelNotAllowed, http.StatusForbidden, nil)
+		return
+	}
 	job.Progress = max(job.Progress, 1)
 	job.UpdatedAt = time.Now().UTC()
 	if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
@@ -538,6 +559,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, "/videos/generations")
 	var selection *selectionSession
 	var lease *accountLease
+	defer func() { lease.Release() }()
 	var result provider.VideoResult
 	var lastErr error
 
@@ -556,7 +578,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 			pinnedAccountID = job.AccountID
 		}
 		if pinnedAccountID > 0 && !excluded[pinnedAccountID] {
-			lease, err = s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.ID, route.UpstreamModel, quotaMode, true)
+			lease, err = s.selector.AcquirePinnedForKey(ctx, route.Provider, pinnedAccountID, route.ID, route.UpstreamModel, quotaMode, true, accountScope)
 			if err != nil {
 				excluded[pinnedAccountID] = true
 				lease = nil
@@ -564,7 +586,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		if lease == nil {
 			if selection == nil {
-				selection, err = s.selector.beginSelectionSession(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false)
+				selection, err = s.selector.beginSelectionSessionForKey(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", excluded, false, accountScope)
 			}
 			if err == nil {
 				lease, err = selection.Acquire(ctx, excluded, false)
@@ -718,8 +740,6 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		s.failVideoJob(parent, job, "account_unavailable", ErrNoAvailableAccount, 0, failureAttempts.snapshot())
 		return
 	}
-	defer lease.Release()
-
 	// Provider 已消费请求体，尽早释放 Base64 物化名额和大字符串。
 	referenceURLs = nil
 	releaseInputSlot()
