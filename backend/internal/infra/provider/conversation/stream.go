@@ -34,6 +34,7 @@ func ConvertResponseStream(source io.ReadCloser, operation string) io.ReadCloser
 }
 
 // ConvertResponseStreamWithOptions 按下游协议选项生成 Chat 或 Anthropic SSE。
+// 上游在发送终止事件前关闭时，转换流返回 io.ErrUnexpectedEOF。
 func ConvertResponseStreamWithOptions(source io.ReadCloser, operation string, options ResponseOptions) io.ReadCloser {
 	if operation == OperationResponses {
 		return guardResponseStream(source)
@@ -282,6 +283,9 @@ func (c *streamConverter) emitPendingWebSearchResults() error {
 func (c *streamConverter) handle(event string, data []byte) error {
 	if c.finished {
 		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return c.done("")
 	}
 	typeName, root, ok := parseSSEEvent(event, data)
 	if !ok {
@@ -698,7 +702,7 @@ func (c *streamConverter) finish() error {
 	if c.finished {
 		return nil
 	}
-	return c.done("")
+	return io.ErrUnexpectedEOF
 }
 
 func streamErrorValue(data []byte) any {
