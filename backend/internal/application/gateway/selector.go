@@ -27,6 +27,7 @@ type accountLease struct {
 	Billing             *account.Billing
 	QuotaProbe          bool
 	QuotaProbeKind      account.QuotaRecoveryKind
+	quotaProbeUntil     time.Time
 	QuotaMode           string
 	routingCandidate    *account.RoutingCandidate
 	selectorObservation *selectorLeaseObservation
@@ -648,6 +649,7 @@ func (s *Selector) acquire(ctx context.Context, provider account.Provider, model
 				}
 				continue
 			}
+			lease.quotaProbeUntil = now.Add(quotaProbeLease)
 			lease.QuotaProbe = true
 			lease.QuotaProbeKind = candidate.QuotaRecovery.Kind
 			lease.Billing = candidate.Billing
@@ -913,6 +915,7 @@ func (s *Selector) acquirePinned(ctx context.Context, provider account.Provider,
 					}
 					return nil, fmt.Errorf("绑定的上游账号恢复探测已被占用")
 				}
+				lease.quotaProbeUntil = now.Add(quotaProbeLease)
 				lease.QuotaProbe = true
 				lease.QuotaProbeKind = recovery.Kind
 				lease.Billing = candidate.Billing
@@ -1081,7 +1084,7 @@ func (s *Selector) MarkFreeQuotaExhausted(ctx context.Context, credential accoun
 }
 
 func (s *Selector) markFreeQuotaExhaustedAt(ctx context.Context, credential account.Credential, used, limit int64, now, nextProbeAt time.Time) error {
-	if err := s.accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+	if err := s.saveQuotaRecovery(ctx, account.QuotaRecovery{
 		AccountID: credential.ID, Kind: account.QuotaRecoveryKindFree, Status: account.QuotaRecoveryStatusExhausted,
 		ConfirmedUsed: used, ConfirmedLimit: limit, ExhaustedAt: &now,
 		NextProbeAt: &nextProbeAt, LastConfirmedAt: &now, UpdatedAt: now,
@@ -1141,7 +1144,7 @@ func (s *Selector) MarkPaymentQuotaExhausted(ctx context.Context, credential acc
 	now := time.Now().UTC()
 	if hints.Billing != nil && hints.Billing.IsPaid() {
 		if periodEnd, ok := hints.Billing.PeriodEnd(); ok && periodEnd.After(now) {
-			if err := s.accounts.SaveQuotaRecovery(ctx, account.QuotaRecovery{
+			if err := s.saveQuotaRecovery(ctx, account.QuotaRecovery{
 				AccountID: credential.ID, Kind: account.QuotaRecoveryKindPaid, Status: account.QuotaRecoveryStatusExhausted,
 				ExhaustedAt: &now, NextProbeAt: &periodEnd, LastConfirmedAt: &now, UpdatedAt: now,
 			}); err != nil {

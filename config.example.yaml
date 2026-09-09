@@ -108,6 +108,27 @@ routing:
   # GROK2API_AUTO_ASSIGN_MAX_MIGRATION_SHARE 可覆盖。
   autoAssignMaxMigrationShare: 0
 
+# [按需启用] 后台账号额度与认证恢复巡检；本节所有配置修改均需重启生效。
+accountRecovery:
+  enabled: false
+  interval: 5m
+  # 三类账号共享每轮批量与并发预算，轮次不重叠。
+  batchSize: 10
+  concurrency: 1
+  probeTimeout: 90s
+  build: true
+  web: true
+  console: true
+  # 允许维护禁用账号；只有单独登记的迁移恢复授权可在额度确认后自动启用。
+  includeDisabled: false
+  # 仅使用已有有效 SSO 恢复 Build 授权，无法刷新已失效的 SSO 本身。
+  ssoReauth: false
+  reauthBatchSize: 1
+  reauthBackoffBase: 1h
+  reauthBackoffMax: 24h
+  # 有界恢复探针，只填写原始 Build 模型名称，不带 web/、console/ 等来源前缀。
+  buildModels: [grok-4.5, grok-4.6]
+
 audit:
   # [通常不要修改] 审计批量写入参数；bufferSize 的修改需重启生效。
   bufferSize: 16384

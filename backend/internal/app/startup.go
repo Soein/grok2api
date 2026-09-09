@@ -379,6 +379,10 @@ func (a *Application) runStatsigWarmup(ctx context.Context) {
 }
 
 func (a *Application) queueDueWebQuotaRefresh(ctx context.Context) {
+	// The unified patrol owns due windows and its configured shared budget.
+	if a.accountRecovery != nil {
+		return
+	}
 	windows, err := a.accounts.ListDueWebQuotaWindows(ctx, time.Now().UTC(), 1000)
 	if err != nil {
 		a.logger.Warn("web_quota_startup_catchup_failed", "error", err)

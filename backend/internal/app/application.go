@@ -14,6 +14,7 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	accountrecoveryapp "github.com/chenyme/grok2api/backend/internal/application/accountrecovery"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	"github.com/chenyme/grok2api/backend/internal/application/adminauth"
 	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
@@ -73,6 +74,7 @@ type Application struct {
 	gateway         *gateway.Service
 	media           *mediaapp.Service
 	quotaRecovery   *quotarecoveryapp.Service
+	accountRecovery *accountrecoveryapp.Service
 	accounts        *accountapp.Service
 	models          *modelapp.Service
 	clientKeys      *clientkeyapp.Service
@@ -363,6 +365,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	gatewayService.ConfigureMediaAssets(mediaService)
 	quotaRecoveryService := quotarecoveryapp.NewService(logger, quotaQueue, accountService, cfg.Provider.Web.RecoveryBackoffBase.Value(), cfg.Provider.Web.RecoveryBackoffMax.Value())
 	quotaRecoveryService.SetBulkPool(syncPool)
+	recoveryIdentity, err := clientKeyService.EnsureAccountRecoveryIdentity(ctx, cfg.AccountRecovery.Enabled && cfg.AccountRecovery.Build)
+	if err != nil {
+		if runtimeStore != nil {
+			_ = runtimeStore.Close()
+		}
+		_ = database.Close()
+		return nil, fmt.Errorf("初始化账号恢复身份: %w", err)
+	}
+	gatewayService.SetQuotaRecoveryIdentity(recoveryIdentity)
+	var accountRecoveryService *accountrecoveryapp.Service
+	if cfg.AccountRecovery.Enabled {
+		accountRecoveryService = accountrecoveryapp.NewService(logger, cfg.AccountRecovery, accountRepo, accountService, gatewayService, quotaRecoveryService, refreshLock)
+	}
 	inferenceConcurrency := httpmiddleware.NewConcurrencyGate(cfg.Server.MaxConcurrentRequests)
 	var notifySettings func(context.Context)
 	if settingsBus != nil {
@@ -439,6 +454,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		accountRecovery: accountRecoveryService,
 	}, nil
 }
 
@@ -607,7 +623,11 @@ func (a *Application) Run(ctx context.Context) error {
 		return nil
 	})
 	startBackground("quota_recovery", func(taskCtx context.Context) error {
-		a.quotaRecovery.Run(taskCtx)
+		if a.accountRecovery != nil {
+			a.accountRecovery.Run(taskCtx)
+		} else {
+			a.quotaRecovery.Run(taskCtx)
+		}
 		return nil
 	})
 	startBackground("quota_refresh", func(taskCtx context.Context) error {
@@ -626,18 +646,22 @@ func (a *Application) Run(ctx context.Context) error {
 		a.runStatsigWarmup(taskCtx)
 		return nil
 	})
-	startBackground("web_quota_startup_catchup", func(taskCtx context.Context) error {
-		a.runWebQuotaCatchup(taskCtx)
-		return nil
-	})
+	if a.accountRecovery == nil {
+		startBackground("web_quota_startup_catchup", func(taskCtx context.Context) error {
+			a.runWebQuotaCatchup(taskCtx)
+			return nil
+		})
+	}
 	startBackground("console_usage_migration", func(taskCtx context.Context) error {
 		a.runConsoleUsageMigration(taskCtx)
 		return nil
 	})
-	startBackground("console_quota_stale_catchup", func(taskCtx context.Context) error {
-		a.runConsoleQuotaCatchup(taskCtx)
-		return nil
-	})
+	if a.accountRecovery == nil {
+		startBackground("console_quota_stale_catchup", func(taskCtx context.Context) error {
+			a.runConsoleQuotaCatchup(taskCtx)
+			return nil
+		})
+	}
 	startBackground("model_catalog_startup_catchup", func(taskCtx context.Context) error {
 		a.runModelCatalogCatchup(taskCtx)
 		return nil

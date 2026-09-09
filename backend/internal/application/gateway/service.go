@@ -129,6 +129,10 @@ type Input struct {
 	// ForcedAccountID is paired with ForcedEgressNodeID only by the internal
 	// Quality Guard recovery path. It never accepts public request input.
 	ForcedAccountID uint64
+	// The maintenance entry point supplies one already-claimed account and route;
+	// these private fields never accept public inference parameters.
+	quotaRecoveryLease *accountLease
+	quotaRecoveryRoute *modeldomain.Route
 }
 
 type Usage struct {
@@ -199,6 +203,7 @@ type accountModelSyncer interface {
 
 // Service handles model routing, account selection, failover, and audit finalization.
 type Service struct {
+	quotaRecoveryIdentity       clientkey.Key
 	models                      routeResolver
 	audits                      auditRecorder
 	accounts                    *accountapp.Service
@@ -857,6 +862,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		auditOperation = input.auditOperation
 	}
 	routes, aliasEffort, err := s.resolvePublicModelRoutes(ctx, input.PublicModel, input.ClientKey.AllowModelAliases)
+	if input.quotaRecoveryRoute != nil {
+		routes, aliasEffort, err = []modeldomain.Route{*input.quotaRecoveryRoute}, "", nil
+	}
 	if err != nil {
 		return nil, ErrModelNotFound
 	}
@@ -892,7 +900,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// Skip targets whose account pool is already known to be unavailable. This
 	// gives same-name targets failover before any physical upstream request while
 	// preserving pinned Responses and forced administrator probes.
-	if routeErr == nil && ownership == nil && input.ForcedEgressNodeID == 0 {
+	if routeErr == nil && ownership == nil && input.ForcedEgressNodeID == 0 && input.quotaRecoveryLease == nil {
 		for _, candidate := range orderedRoutes {
 			affinityKey := ""
 			if candidate.Provider == accountdomain.ProviderBuild {
@@ -1021,7 +1029,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	holdCfg := s.qualityRetryConfig()
 	qualityHoldEnabled := shouldHoldQualityStream(input, ownership, route, operation, holdCfg)
 	qualityCrossAccountReplay := canReplayQualityHoldAcrossAccounts(input, ownership)
-	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0)
+	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0 || input.quotaRecoveryLease != nil)
 	idempotencyID, _ := security.NewOpaqueToken(18)
 	pricingModel := s.providers.PricingModel(route.Provider, route.UpstreamModel)
 	if err := s.checkLedgerReady(); err != nil {
@@ -1073,6 +1081,17 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				successful := auditRequestSucceeded(response.StatusCode, errorCode)
 				lease.completeSelectorObservation(successful)
 				budget := newFinalizationBudget(string(operation), string(route.Provider))
+				if lease.QuotaProbe && successful && ctx.Err() == nil && (usage.OutputObserved || usage.OutputTokens > 0) {
+					if repo, ok := s.selector.accounts.(quotaRecoveryRepository); ok && !lease.quotaProbeUntil.IsZero() {
+						if err := budget.run("quota_recovery", finalizationQuotaBudget, func(stageCtx context.Context) error {
+							_, err := repo.CompleteQuotaProbe(stageCtx, credential.ID, lease.quotaProbeUntil, true, time.Now().UTC())
+							return err
+						}); err != nil {
+							s.logger.Warn("quota_recovery_complete_failed", "account_id", credential.ID, "error", err)
+						}
+						s.selector.MarkQuotaStateChanged(credential.Provider, credential.ID)
+					}
+				}
 				if isUpstreamStreamFailure(errorCode) {
 					status, retryAfter := streamFailureHealthPenalty(errorCode, usage, s.qualityRetryConfig().IdleAccountCooldown)
 					if err := budget.run("account_health", finalizationHealthBudget, func(stageCtx context.Context) error {
@@ -1209,13 +1228,20 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	}
 attemptLoop:
 	for attempt := 0; attemptPolicy.allows(attempt); attempt++ {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
+			lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", Cause: err}
+			break
+		}
 		if qualityHoldEnabled && qualityAccountAttempts >= holdCfg.MaxAttempts {
 			break
 		}
 		var lease *accountLease
 		var err error
 		selectionStarted := time.Now()
-		if input.ForcedAccountID != 0 {
+		if input.quotaRecoveryLease != nil {
+			lease = input.quotaRecoveryLease
+		} else if input.ForcedAccountID != 0 {
 			if input.ForcedEgressNodeID == 0 {
 				err = &SelectionUnavailableError{Reason: SelectionNoAccounts}
 			} else {
@@ -1265,10 +1291,10 @@ attemptLoop:
 			}
 			lastErr = fmt.Errorf("上游 Team 与模型请求频率受限")
 			s.logger.Warn("upstream_team_model_rate_limit_active", "request_id", input.RequestID, "account_id", lease.Credential.ID, "provider", route.Provider, "model", route.UpstreamModel, "team_fingerprint", limited.TeamFingerprint, "retry_after", lastFailure.RetryAfter.Round(time.Second))
-			// Stored Responses are pinned to one account. Return the cached 429
+			// Stored Responses and maintenance probes are pinned to one account. Return the cached 429
 			// immediately instead of spinning until the cooldown expires or
 			// replaying the request on the same account.
-			if ownership != nil || input.ForcedAccountID != 0 {
+			if ownership != nil || input.ForcedAccountID != 0 || input.quotaRecoveryLease != nil {
 				break attemptLoop
 			}
 			attempt--
@@ -1278,7 +1304,7 @@ attemptLoop:
 			quotaProbeAttempted = true
 		}
 		if lease.QuotaProbeKind == accountdomain.QuotaRecoveryKindPaid {
-			recovered, probeErr := s.accounts.ProbePaidQuota(ctx, lease.Credential)
+			recovered, probeErr := s.accounts.ProbePaidQuotaClaimed(ctx, lease.Credential, lease.quotaProbeUntil)
 			s.selector.MarkQuotaStateChanged(lease.Credential.Provider, lease.Credential.ID)
 			if probeErr != nil || !recovered {
 				lease.Release()
@@ -1341,7 +1367,7 @@ attemptLoop:
 			continue
 		}
 	handleResponse:
-		if response.ModelCatalogChanged {
+		if response.ModelCatalogChanged && input.quotaRecoveryLease == nil {
 			s.queueAccountModelSync(credential.ID)
 		}
 		if response.StatusCode == http.StatusUnauthorized {
@@ -1508,6 +1534,10 @@ attemptLoop:
 				goto handleResponse
 			}
 			failureHandled := false
+			quotaWriteCtx := ctx
+			if lease.QuotaProbe {
+				quotaWriteCtx = context.WithValue(ctx, quotaRecoveryClaimContextKey{}, lease.quotaProbeUntil)
+			}
 			if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
 				state, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
 				s.applyRateLimitReconciliation(ctx, credential, response.StatusCode, retryAfter, state, reconcileErr)
@@ -1515,16 +1545,16 @@ attemptLoop:
 			} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
 				// The Free subscription signal is account-scoped, but its billing
 				// period is not a reliable reset promise. Probe again after 24 hours.
-				s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit)
+				s.selector.MarkFreeQuotaExhausted(quotaWriteCtx, credential, used, limit)
 				failureHandled = true
 			} else if lastFailure.ModelQuotaExhausted {
-				s.selector.MarkModelQuotaExhausted(ctx, credential, lease.Billing, route.UpstreamModel, retryAfter)
+				s.selector.MarkModelQuotaExhausted(quotaWriteCtx, credential, lease.Billing, route.UpstreamModel, retryAfter)
 				failureHandled = true
 			} else if lastFailure.FreeQuotaExhausted {
-				s.selector.MarkFreeQuotaExhausted(ctx, credential, 0, 0)
+				s.selector.MarkFreeQuotaExhausted(quotaWriteCtx, credential, 0, 0)
 				failureHandled = true
 			} else if lastFailure.SpendingLimitBlocked || lastFailure.QuotaExhausted {
-				err := s.selector.MarkPaymentQuotaExhausted(ctx, credential, quotaRecoveryHints{Billing: lease.Billing})
+				err := s.selector.MarkPaymentQuotaExhausted(quotaWriteCtx, credential, quotaRecoveryHints{Billing: lease.Billing})
 				failureHandled = err == nil
 				if err != nil {
 					s.logger.Error("account_quota_recovery_write_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "error", err)
@@ -1574,7 +1604,7 @@ attemptLoop:
 			continue
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
-			s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
+			s.selector.markSuccess(ctx, credential, false)
 			if qualityHoldEnabled {
 				replay, verdict, peekUsage, _, peekErr := peekQualityStream(ctx, response.Body, qualityProtocolForOperation(operation), holdCfg)
 				if peekErr != nil {
