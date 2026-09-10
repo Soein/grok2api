@@ -275,7 +275,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		resolution = "720p"
 	}
 	payload := videoCreatePayload(request.Prompt, ratio, resolution, segments[0])
-	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
+	response, err := a.postJSONWithSigningPolicy(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second, cfg.BaseURL+"/imagine", true)
 	if err != nil {
 		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoCreateFailureStage(err), 0, err)
 	}
