@@ -1,0 +1,20 @@
+[Unit]
+Description=Validate Grok public build before renewing local signing parameters
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=10001
+Group=10001
+ExecStart=/usr/bin/python3 /opt/grok-signer/page_guard.py --template /opt/grok-signer/parameters/template.json --manifest /opt/grok-signer/parameters/manifest.json --output /opt/grok-signer/runtime/params.json --ttl-seconds 900
+TimeoutStartSec=60
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/opt/grok-signer/runtime
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=

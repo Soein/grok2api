@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Grok public signing build every five minutes
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=5min
+AccuracySec=1s
+Unit=grok-signer-page-guard.service
+
+[Install]
+WantedBy=timers.target

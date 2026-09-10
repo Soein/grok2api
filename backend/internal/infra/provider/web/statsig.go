@@ -25,6 +25,7 @@ import (
 const (
 	defaultStatsigSignerURL = "https://grok.wodf.de/sign"
 	statsigCacheTTL         = time.Hour
+	statsigInternalCacheTTL = time.Minute
 	statsigCacheMaxEntries  = 4096
 	statsigMetaBodyLimit    = 4 << 20
 	statsigResponseLimit    = 4 << 10
@@ -71,6 +72,7 @@ func newStatsigSigner() *statsigSigner {
 }
 
 func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, target string) (string, string, error) {
+	ttl, allowStale := statsigSignerCachePolicy(signerURL)
 	key, path, err := statsigSignatureKey(baseURL, signerURL, method, target)
 	if err != nil {
 		return "", "", err
@@ -85,12 +87,12 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 		}
 		fresh, refreshErr := s.freshSignature(ctx, baseURL, signerURL, token, lease, method, path)
 		if refreshErr != nil {
-			if stale, ok := s.stale(key); ok {
+			if stale, ok := s.stale(key); allowStale && ok {
 				return statsigSignResult{value: stale, source: "stale"}, nil
 			}
 			return statsigSignResult{}, refreshErr
 		}
-		s.store(key, fresh, now.Add(statsigCacheTTL), now)
+		s.store(key, fresh, now.Add(ttl), now)
 		return statsigSignResult{value: fresh, source: "refresh"}, nil
 	})
 	if err != nil {
@@ -102,6 +104,7 @@ func (s *statsigSigner) Sign(ctx context.Context, baseURL, signerURL, token stri
 
 // Warm 使用一次 metaContent 请求预热多个常用签名键，避免按账号或按路径重复抓取首页。
 func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, targets []statsigWarmTarget) (int, error) {
+	ttl, _ := statsigSignerCachePolicy(signerURL)
 	now := s.now().UTC()
 	type pendingTarget struct {
 		key    string
@@ -132,10 +135,21 @@ func (s *statsigSigner) Warm(ctx context.Context, baseURL, signerURL, token stri
 		if signErr != nil {
 			return warmed, signErr
 		}
-		s.store(target.key, value, now.Add(statsigCacheTTL), now)
+		s.store(target.key, value, now.Add(ttl), now)
 		warmed++
 	}
 	return warmed, nil
+}
+
+// Internal signers can reject obsolete signing parameters through their version
+// guard. Bound cached use and propagate refresh failures instead of hiding them
+// behind an indefinitely reusable stale signature.
+func statsigSignerCachePolicy(endpoint string) (ttl time.Duration, allowStale bool) {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err == nil && signerurl.IsInternalHost(parsed.Hostname()) {
+		return statsigInternalCacheTTL, false
+	}
+	return statsigCacheTTL, true
 }
 
 func (s *statsigSigner) freshSignature(ctx context.Context, baseURL, signerURL, token string, lease *infraegress.Lease, method, path string) (string, error) {
