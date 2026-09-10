@@ -1397,6 +1397,10 @@ func (a *Adapter) postJSON(ctx context.Context, cfg Config, lease *egress.Lease,
 }
 
 func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, payload any, timeout time.Duration, referer string) (*http.Response, error) {
+	return a.postJSONWithSigningPolicy(ctx, cfg, lease, token, endpoint, payload, timeout, referer, false)
+}
+
+func (a *Adapter) postJSONWithSigningPolicy(ctx context.Context, cfg Config, lease *egress.Lease, token, endpoint string, payload any, timeout time.Duration, referer string, requireSignature bool) (*http.Response, error) {
 	data, _ := json.Marshal(payload)
 	for attempt := 0; attempt < 2; attempt++ {
 		requestCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -1407,7 +1411,12 @@ func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *eg
 		}
 		request.Header = buildHeaders(token, lease, "application/json")
 		applyAppHeaders(request.Header, cfg.BaseURL, referer)
-		a.applySignedStatsig(requestCtx, request, token, lease)
+		if err := a.applySignedStatsig(requestCtx, request, token, lease); err != nil && requireSignature {
+			cancel()
+			// A shared signing failure is not an account failure. Stop before
+			// sending an unsigned POST instead of rotating credentials.
+			return nil, provider.WrapVideoStage(provider.VideoStagePrepare, http.StatusServiceUnavailable, err)
+		}
 		response, err := lease.DoDeferredForbidden(request)
 		if err != nil {
 			cancel()
@@ -1439,6 +1448,10 @@ func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *eg
 			if isStatsigRefreshableMediaError(upstreamErr, body) {
 				if attempt == 0 && a.invalidateSignedStatsig(http.MethodPost, endpoint) {
 					continue
+				}
+				if requireSignature {
+					a.logWebMediaUpstreamRejection("video_signing", response, upstreamErr)
+					return nil, provider.WrapVideoStage(provider.VideoStagePrepare, http.StatusForbidden, upstreamErr)
 				}
 				return response, nil
 			}

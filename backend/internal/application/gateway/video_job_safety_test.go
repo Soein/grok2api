@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -255,5 +256,54 @@ func TestVideoJobDefersWhenKeyPolicyCannotBeLoaded(t *testing.T) {
 	}
 	if job := f.storedJob(t); job.Status != media.StatusInProgress || job.CompletedAt != nil || job.LeaseUntil == nil || !job.LeaseUntil.After(time.Now()) {
 		t.Fatalf("temporary key lookup failure terminated job: %#v", job)
+	}
+}
+
+func TestVideoJobSigningFailuresDoNotRotateOrPenalizeAccounts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+	}{
+		{name: "signing service unavailable", status: http.StatusServiceUnavailable},
+		{name: "fresh signature rejected", status: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newVideoJobSafetyFixture(t)
+			f.service.UpdateVideoMaxAttempts(999)
+			f.adapter.stage = provider.VideoStagePrepare
+			f.adapter.status = test.status
+			f.adapter.failures[f.first.ID] = 999
+			before := make([]account.Credential, 0, 2)
+			for _, id := range []uint64{f.first.ID, f.second.ID} {
+				credential, err := f.service.selector.accounts.Get(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before = append(before, credential)
+			}
+
+			f.service.runVideoJob(ctx, f.job, f.route)
+
+			if attempts := f.adapter.Attempts(); len(attempts) != 1 || attempts[0] != f.first.ID {
+				t.Fatalf("signing failure rotated accounts or retried: attempts=%v", attempts)
+			}
+			if job := f.storedJob(t); job.Status != media.StatusFailed {
+				t.Fatalf("job status=%s, want failed", job.Status)
+			}
+			for _, previous := range before {
+				current, err := f.service.selector.accounts.Get(ctx, previous.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.Enabled != previous.Enabled || current.AuthStatus != previous.AuthStatus || current.FailureCount != previous.FailureCount || !reflect.DeepEqual(current.CooldownUntil, previous.CooldownUntil) {
+					t.Errorf("account %d penalized by shared signing failure: enabled=%v auth=%s failures=%d cooldown=%v", current.ID, current.Enabled, current.AuthStatus, current.FailureCount, current.CooldownUntil)
+				}
+				count, err := f.limiter.Current(ctx, accountConcurrencyKey(previous.ID))
+				if err != nil || count != 0 {
+					t.Errorf("account %d slots after failure=%d, err=%v, want 0", previous.ID, count, err)
+				}
+			}
+		})
 	}
 }

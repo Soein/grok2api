@@ -744,6 +744,7 @@ type videoCreateFailoverAdapter struct {
 	mu       sync.Mutex
 	failures map[uint64]int
 	status   int
+	stage    provider.VideoStage
 	attempts []uint64
 }
 
@@ -767,7 +768,11 @@ func (a *videoCreateFailoverAdapter) GenerateVideo(_ context.Context, request pr
 		if a.status == 0 {
 			return provider.VideoResult{}, errors.New("unclassified create failure")
 		}
-		return provider.VideoResult{}, provider.WrapVideoStage(provider.VideoStageCreate, a.status, videoHTTPStatusError{status: a.status})
+		stage := a.stage
+		if stage == "" {
+			stage = provider.VideoStageCreate
+		}
+		return provider.VideoResult{}, provider.WrapVideoStage(stage, a.status, videoHTTPStatusError{status: a.status})
 	}
 	return provider.VideoResult{AssetID: "video_asset_00001", ContentType: "video/mp4"}, nil
 }
