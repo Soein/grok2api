@@ -1,0 +1,29 @@
+services:
+  signer:
+    image: ${GROK_SIGNER_IMAGE:?Set a verified image ID or digest}
+    container_name: grok-signer
+    entrypoint: ["/usr/local/bin/grok-signer"]
+    command: ["--listen", "0.0.0.0:8788", "--config", "/signer/params.json"]
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 1
+    pids_limit: 64
+    volumes:
+      - ./runtime:/signer:ro
+    networks: [grok]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8788/healthz >/dev/null"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  grok:
+    external: true
+    name: ${GROK2API_NETWORK:?Set the existing Grok2API network}

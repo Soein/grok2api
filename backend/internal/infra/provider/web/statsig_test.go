@@ -437,3 +437,102 @@ func TestStatsigInvalidationOnlyAppliesToURLMode(t *testing.T) {
 		t.Fatal("URL Statsig must be invalidated after anti-bot rejection")
 	}
 }
+
+type statsigCachePolicyFixture struct {
+	signer      *statsigSigner
+	now         time.Time
+	calls       int
+	unavailable bool
+}
+
+func newStatsigCachePolicyFixture() *statsigCachePolicyFixture {
+	f := &statsigCachePolicyFixture{signer: newStatsigSigner(), now: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)}
+	f.signer.now = func() time.Time { return f.now }
+	f.signer.validateEndpoint = func(context.Context, string) error { return nil }
+	f.signer.fetchMeta = func(context.Context, string, string, *infraegress.Lease) (string, error) { return "page-meta", nil }
+	f.signer.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		f.calls++
+		if f.unavailable {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		raw := make([]byte, 70)
+		raw[0] = byte(f.calls)
+		body, _ := json.Marshal(map[string]string{"x-statsig-id": base64.RawStdEncoding.EncodeToString(raw)})
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+	})}
+	return f
+}
+
+func TestStatsigCacheLifetimeAndStalePolicyBySignerHost(t *testing.T) {
+	for _, test := range []struct {
+		name, endpoint string
+		ttl            time.Duration
+		allowStale     bool
+	}{
+		{"container", "http://grok-signer:8788/sign", time.Minute, false},
+		{"private address", "http://10.0.0.5:8788/sign", time.Minute, false},
+		{"internal HTTPS", "https://host.docker.internal:8788/sign", time.Minute, false},
+		{"loopback", "http://[::1]:8788/sign", time.Minute, false},
+		{"public HTTPS", "https://signer.example/sign", time.Hour, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newStatsigCachePolicyFixture()
+			sign := func() (string, string, error) {
+				return f.signer.Sign(context.Background(), "https://grok.com", test.endpoint, "token", nil, http.MethodPost, "https://grok.com/rest/chat")
+			}
+			initial, source, err := sign()
+			if err != nil || source != "refresh" {
+				t.Fatalf("initial source=%s err=%v", source, err)
+			}
+			f.now = f.now.Add(test.ttl - time.Nanosecond)
+			cached, source, err := sign()
+			if err != nil || source != "cache" || cached != initial || f.calls != 1 {
+				t.Fatalf("before expiry source=%s calls=%d err=%v", source, f.calls, err)
+			}
+			f.now = f.now.Add(time.Nanosecond)
+			fresh, source, err := sign()
+			if err != nil || source != "refresh" || fresh == initial || f.calls != 2 {
+				t.Errorf("at expiry source=%s calls=%d err=%v; want fresh signature", source, f.calls, err)
+			}
+			f.now = f.now.Add(test.ttl)
+			f.unavailable = true
+			value, source, err := sign()
+			if test.allowStale {
+				if err != nil || source != "stale" || value != fresh {
+					t.Errorf("remote fallback source=%s err=%v; want prior signature", source, err)
+				}
+			} else if err == nil || source != "" || value != "" {
+				t.Errorf("internal signer failure used cache: source=%s err=%v", source, err)
+			}
+		})
+	}
+}
+
+func TestStatsigWarmUsesSignerHostCacheLifetime(t *testing.T) {
+	for _, test := range []struct {
+		name, endpoint string
+		ttl            time.Duration
+	}{
+		{"internal", "http://grok-signer:8788/sign", time.Minute},
+		{"external", "https://signer.example/sign", time.Hour},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newStatsigCachePolicyFixture()
+			targets := []statsigWarmTarget{{method: http.MethodPost, target: "https://grok.com/rest/chat"}, {method: http.MethodPost, target: "https://grok.com/rest/rate-limits"}}
+			warm := func() (int, error) {
+				return f.signer.Warm(context.Background(), "https://grok.com", test.endpoint, "token", nil, targets)
+			}
+			if count, err := warm(); err != nil || count != 2 {
+				t.Fatalf("initial warm=%d err=%v", count, err)
+			}
+			f.now = f.now.Add(test.ttl - time.Nanosecond)
+			if count, err := warm(); err != nil || count != 0 {
+				t.Fatalf("warm before expiry=%d err=%v", count, err)
+			}
+			f.now = f.now.Add(time.Nanosecond)
+			if count, err := warm(); err != nil || count != 2 {
+				t.Errorf("warm at expiry=%d err=%v; want 2", count, err)
+			}
+		})
+	}
+}
