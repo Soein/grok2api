@@ -7,6 +7,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
@@ -22,7 +23,10 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	if affinity == "" {
 		affinity = "bootstrap"
 	}
+	timing := infraegress.CallTimingFromContext(request.Context())
+	acquireStarted := time.Now()
 	lease, configured, err := t.manager.AcquireIfConfigured(request.Context(), domainegress.ScopeBuild, affinity)
+	timing.RecordStage(infraegress.TimingAcquire, time.Since(acquireStarted))
 	if err != nil {
 		return nil, err
 	}
@@ -31,13 +35,16 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 		// direct node so different accounts do not share the process-wide fallback
 		// HTTP transport / TCP connection pool. Preserve the fallback transport's
 		// HTTP_PROXY/HTTPS_PROXY behavior while partitioning the pool.
+		acquireStarted = time.Now()
 		lease, configured, err = t.manager.AcquireBuildEnvironmentDirectIfIsolated(request.Context(), affinity)
+		timing.RecordStage(infraegress.TimingAcquire, time.Since(acquireStarted))
 		if err != nil {
 			return nil, err
 		}
 		if !configured {
 			idleRequest := t.withStreamIdleContext(request)
 			response, requestErr := t.fallback.RoundTrip(idleRequest)
+			timing.MarkTransportReturned()
 			infraegress.RecordDirectPhysicalCall(request.Context(), response, requestErr)
 			if requestErr != nil || response == nil || response.Body == nil {
 				return response, requestErr
@@ -51,14 +58,19 @@ func (t *egressTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	}
 	idleRequest := t.withStreamIdleContext(request)
 	response, err := lease.Do(idleRequest)
+	timing.MarkTransportReturned()
 	if err != nil {
 		if shouldReportEgressFailure(request.Context(), err) {
+			feedbackStarted := time.Now()
 			t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, 0, err)
+			timing.RecordStage(infraegress.TimingFeedback, time.Since(feedbackStarted))
 		}
 		lease.Release()
 		return nil, err
 	}
+	feedbackStarted := time.Now()
 	t.manager.FeedbackForScope(context.WithoutCancel(request.Context()), domainegress.ScopeBuild, lease.NodeID, response.StatusCode, nil)
+	timing.RecordStage(infraegress.TimingFeedback, time.Since(feedbackStarted))
 	if response.Body == nil {
 		lease.Release()
 		return response, nil

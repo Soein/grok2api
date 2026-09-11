@@ -320,6 +320,8 @@ func (m *Manager) waitForFailureProbe(ctx context.Context, nodeID uint64) (bool,
 	if state.done == nil {
 		return false, nil
 	}
+	waitStarted := time.Now()
+	defer func() { CallTimingFromContext(ctx).RecordStage(TimingFailureProbeWait, time.Since(waitStarted)) }()
 	timer := time.NewTimer(failureProbeWaitTimeout)
 	defer timer.Stop()
 	select {

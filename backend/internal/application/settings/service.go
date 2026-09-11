@@ -313,7 +313,8 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		capacityWait = base.Routing.CapacityWait.Value()
 	}
 	base.Provider.Build = config.BuildProviderConfig{
-		BaseURL: value.ProviderBuild.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(value.ProviderBuild.FallbackBaseURL),
+		RequestTimingEnabled: base.Provider.Build.RequestTimingEnabled,
+		BaseURL:              value.ProviderBuild.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(value.ProviderBuild.FallbackBaseURL),
 		ClientVersion: value.ProviderBuild.ClientVersion, ClientIdentifier: value.ProviderBuild.ClientIdentifier,
 		TokenAuth: value.ProviderBuild.TokenAuth, UserAgent: value.ProviderBuild.UserAgent,
 		ResponseHeaderTimeout: config.Duration(value.ProviderBuild.ResponseHeaderTimeout),

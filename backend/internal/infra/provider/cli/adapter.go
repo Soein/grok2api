@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +36,7 @@ import (
 )
 
 type Config struct {
+	RequestTimingEnabled  bool
 	BaseURL               string
 	FallbackBaseURL       string
 	ClientVersion         string
@@ -68,6 +70,7 @@ type Adapter struct {
 	replay         *reasoningreplay.ReasoningReplay
 	compaction     *gatewayCompactionCodec
 	logger         *slog.Logger
+	timingLogs     requestTimingLogWriter
 }
 
 func NewAdapter(cfg Config, cipher *security.Cipher) *Adapter {
@@ -227,7 +230,12 @@ func (a *Adapter) config() Config {
 	return a.cfg
 }
 
-func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+func (a *Adapter) ForwardResponse(ctx context.Context, request provider.ResponseResourceRequest) (result *provider.Response, forwardErr error) {
+	if a.config().RequestTimingEnabled && request.Streaming && request.Method == http.MethodPost && isTimingTextOperation(request.Operation) {
+		var timing *infraegress.RequestTiming
+		ctx, timing = infraegress.WithRequestTiming(ctx)
+		defer func() { a.attachRequestTiming(result, forwardErr, request, timing) }()
+	}
 	if request.NormalizedMetadata != nil {
 		*request.NormalizedMetadata = provider.NormalizedRequestMetadata{}
 	}
@@ -323,7 +331,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	if call.err != nil {
 		return nil, call.err
 	}
-	if err := normalizeGzipResponse(call.response); err != nil {
+	if err := normalizeTimedBuildResponse(call); err != nil {
 		return nil, err
 	}
 	call, reasoningRecovery, recoveryErr := a.recoverReasoningDecodeFailure(ctx, request, accessToken, body, base, replayKey, call)
@@ -353,7 +361,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				fallbackCall := a.doResponseRequest(fallbackCtx, request, accessToken, fallbackBody, fallbackBase)
 				fallbackErr := fallbackCall.err
 				if fallbackErr == nil {
-					fallbackErr = normalizeGzipResponse(fallbackCall.response)
+					fallbackErr = normalizeTimedBuildResponse(fallbackCall)
 				}
 				fallbackRecovery := reasoningRecoveryOutcome{}
 				if fallbackErr == nil {
@@ -551,6 +559,7 @@ func isCompactPath(path string) bool {
 }
 
 type responseCall struct {
+	timing      *infraegress.CallTiming
 	response    *http.Response
 	upstreamURL string
 	startedAt   time.Time
@@ -561,7 +570,7 @@ type responseCall struct {
 // doResponseRequest 发起一次真实 Responses 上游调用，并保留该次调用自己的审计来源信息。
 func (a *Adapter) doResponseRequest(ctx context.Context, request provider.ResponseResourceRequest, accessToken string, body []byte, base string) (call responseCall) {
 	startedAt := time.Now()
-	call = responseCall{upstreamURL: a.urlWithBase(base, request.Path), startedAt: startedAt.UTC()}
+	call.upstreamURL, call.startedAt = a.urlWithBase(base, request.Path), startedAt.UTC()
 	defer func() {
 		call.durationMS = time.Since(startedAt).Milliseconds()
 	}()
@@ -578,6 +587,10 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		plane = "xai"
 	}
 	requestCtx = infraegress.WithPhysicalCallPlane(requestCtx, plane)
+	requestCtx, call.timing = infraegress.BeginTimingCall(requestCtx)
+	if trace := call.timing.HTTPTrace(); trace != nil {
+		requestCtx = httptrace.WithClientTrace(requestCtx, trace)
+	}
 	req, err := http.NewRequestWithContext(requestCtx, request.Method, call.upstreamURL, bodyReader)
 	if err != nil {
 		call.err = err
@@ -614,6 +627,7 @@ func (a *Adapter) doResponseRequest(ctx context.Context, request provider.Respon
 		req = req.WithContext(requestCtx)
 	}
 	resp, err := a.http.Do(req)
+	call.timing.MarkHTTPReturned()
 	if err != nil {
 		if responseIdleCancel != nil {
 			responseIdleCancel(nil)
