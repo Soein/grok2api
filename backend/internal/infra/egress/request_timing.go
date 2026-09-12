@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"maps"
 	"net/http/httptrace"
 	"strings"
 	"sync"
@@ -29,10 +30,11 @@ const (
 // RequestTiming contains bounded, observe-only timing for a downstream request.
 // It never stores request or response contents in its snapshots.
 type RequestTiming struct {
-	mu      sync.Mutex
-	start   time.Time
-	calls   []*CallTiming
-	dropped int
+	mu        sync.Mutex
+	start     time.Time
+	calls     []*CallTiming
+	dropped   int
+	preflight *PreflightTimingSnapshot
 }
 
 // CallTiming records one logical adapter HTTP call, including any transport
@@ -57,9 +59,10 @@ type CallTiming struct {
 
 // RequestTimingSnapshot is a detached copy safe for structured logging.
 type RequestTimingSnapshot struct {
-	TotalMS      float64              `json:"total_ms"`
-	Calls        []CallTimingSnapshot `json:"calls"`
-	DroppedCalls int                  `json:"dropped_calls"`
+	Preflight    *PreflightTimingSnapshot `json:"preflight,omitempty"`
+	TotalMS      float64                  `json:"total_ms"`
+	Calls        []CallTimingSnapshot     `json:"calls"`
+	DroppedCalls int                      `json:"dropped_calls"`
 }
 
 // CallTimingSnapshot uses milliseconds relative to the logical adapter call, except
@@ -106,7 +109,7 @@ func WithRequestTiming(ctx context.Context) (context.Context, *RequestTiming) {
 	if root := RequestTimingFromContext(ctx); root != nil {
 		return ctx, root
 	}
-	root := &RequestTiming{start: time.Now()}
+	root := &RequestTiming{start: time.Now(), preflight: PreflightTimingFromContext(ctx).Snapshot()}
 	return context.WithValue(ctx, requestTimingKey{}, root), root
 }
 
@@ -445,6 +448,14 @@ func (r *RequestTiming) Snapshot() RequestTimingSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := RequestTimingSnapshot{TotalMS: milliseconds(time.Since(r.start)), DroppedCalls: r.dropped, Calls: make([]CallTimingSnapshot, 0, len(r.calls))}
+	// Freeze Gateway work at adapter entry; subsequent account attempts must not
+	// change earlier records or the established adapter-relative clock.
+	if r.preflight != nil {
+		preflight := *r.preflight
+		preflight.Stages = maps.Clone(r.preflight.Stages)
+		preflight.Counters = maps.Clone(r.preflight.Counters)
+		result.Preflight = &preflight
+	}
 	for _, c := range r.calls {
 		c.mu.Lock()
 		s := c.snapshot

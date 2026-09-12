@@ -8,6 +8,7 @@ import (
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/infra/egress"
 )
 
 // selectionSession 保存一次下游请求的候选快照和计划。账号切换时复用它，
@@ -46,6 +47,10 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 	if err != nil {
 		return nil, err
 	}
+	timing := egress.PreflightTimingFromContext(ctx)
+	timing.Add("candidates_loaded", len(values))
+	filterStarted := timing.Start()
+	defer timing.Observe("candidate_filter", filterStarted)
 	quotaConsumed := s.quotaConsumptionSnapshot(provider)
 	healthOverrides := s.routingHealthSnapshot(provider, now)
 
@@ -119,6 +124,9 @@ func (s *Selector) beginSelectionSessionForKey(ctx context.Context, provider acc
 		}
 		session.normalCandidates = append(session.normalCandidates, index)
 	}
+
+	timing.Add("candidates_normal", len(session.normalCandidates))
+	timing.Add("candidates_probe", len(session.probeCandidates))
 
 	if len(session.normalCandidates) > 0 || (allowQuotaProbe && len(session.probeCandidates) > 0) {
 		return session, nil
