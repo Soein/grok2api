@@ -2031,14 +2031,42 @@ func applyAssociationFilter(query *gorm.DB, providerValue, association string) *
 func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessToken, refreshToken string, expiresAt time.Time, buildBotFlagSource int) (account.Credential, error) {
 	now := time.Now().UTC()
 	refreshDueAt := account.CredentialRefreshDueAt(id, expiresAt)
+	var isOrdinaryRenewal bool
 	if err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var providerRow struct{ Provider string }
-		if err := tx.Model(&accountModel{}).Select("provider").Where("id = ?", id).Take(&providerRow).Error; err != nil {
+		var credRow accountCredentialModel
+		var credentialExists bool
+		credErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("account_id", "auth_type", "refresh_permanent", "build_bot_flag_source").
+			Where("account_id = ?", id).
+			Take(&credRow).Error
+		if credErr == nil {
+			credentialExists = true
+		} else if !errors.Is(credErr, gorm.ErrRecordNotFound) {
+			return credErr
+		}
+
+		var accountRow accountModel
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "provider", "enabled", "auth_status", "last_error").
+			Where("id = ?", id).
+			Take(&accountRow).Error; err != nil {
 			return err
 		}
+
+		normalizedBotFlag := normalizeBuildBotFlagSource(account.Provider(accountRow.Provider), buildBotFlagSource)
+
+		isOrdinaryRenewal = credentialExists &&
+			account.Provider(accountRow.Provider) == account.ProviderBuild &&
+			accountRow.Enabled &&
+			account.AuthStatus(accountRow.AuthStatus) == account.AuthStatusActive &&
+			accountRow.LastError == "" &&
+			account.AuthType(credRow.AuthType) == account.AuthTypeOAuth &&
+			!credRow.RefreshPermanent &&
+			credRow.BuildBotFlagSource == normalizedBotFlag
+
 		updates := map[string]any{
 			"encrypted_primary": accessToken, "expires_at": expiresAt, "refresh_due_at": refreshDueAt,
-			"build_bot_flag_source": normalizeBuildBotFlagSource(account.Provider(providerRow.Provider), buildBotFlagSource),
+			"build_bot_flag_source": normalizedBotFlag,
 			"last_refresh_at":       now, "refresh_failures": 0, "refresh_unclassified_auth_failures": 0, "last_refresh_error_status": 0, "last_refresh_error": "", "last_refresh_error_message": "", "last_refresh_error_response": "", "refresh_permanent": false, "updated_at": now,
 		}
 		if refreshToken != "" {
@@ -2052,13 +2080,15 @@ func (r *AccountRepository) UpdateTokens(ctx context.Context, id uint64, accessT
 		return account.Credential{}, err
 	}
 	stored, err := r.Get(ctx, id)
-	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, Provider: stored.Provider, AccountID: id})
-	} else {
+	if err != nil {
 		// The database write already committed; retain a broad fallback if the read-back fails.
 		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, AccountID: id})
+		return stored, err
 	}
-	return stored, err
+	if !isOrdinaryRenewal {
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, Provider: stored.Provider, AccountID: id})
+	}
+	return stored, nil
 }
 
 // BackfillCredentialRefreshSchedules 为升级前凭据分批补齐调度时间，不解密 Token，也不发起 OAuth 请求。
