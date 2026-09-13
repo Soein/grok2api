@@ -13,11 +13,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
 	"github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
@@ -357,6 +359,7 @@ type Selector struct {
 	segmentedConfig        segmentedSelectorConfig
 	segmentedState         segmentedSelectorState
 	configMu               sync.RWMutex
+	invalidationTiming     atomic.Bool
 	candidateMu            sync.Mutex
 	selectionMu            sync.RWMutex
 	healthMu               sync.RWMutex
@@ -1113,9 +1116,9 @@ func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential accou
 	_ = s.accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{
 		AccountID: credential.ID, UpstreamModel: upstreamModel, Reason: "model_quota_depleted", CooldownUntil: until, UpdatedAt: time.Now().UTC(),
 	})
-	// The model block makes affected bindings ineligible and they are rebound on
-	// the next request. Preserve unrelated model/session affinity for this account.
-	s.invalidateCandidates(credential.Provider)
+	// The model block affects the overlay, not the account base. Apply locally
+	// as well for repositories without an invalidation observer.
+	s.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountModelQuotaChanged, Provider: credential.Provider, AccountID: credential.ID, UpstreamModel: upstreamModel})
 }
 
 // MarkModelAccessDenied isolates a permission failure to the rejected model.
@@ -1450,20 +1453,15 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 		}
 		s.candidateMu.Unlock()
 		layered := s.accounts.(repository.RoutingLayerRepository)
-		for attempt := 0; attempt < 4; attempt++ {
-			bases, baseVersion, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
-			if loadErr != nil {
-				return nil, loadErr
-			}
-			overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, modelRouteID, upstreamModel, checkTime)
-			if loadErr != nil {
-				return nil, loadErr
-			}
-			if !s.routingVersionsStable(provider, baseVersion, overlayVersion) {
-				timing.Add("candidate_version_retry_after_load", 1)
-				checkTime = time.Now().UTC()
-				continue
-			}
+		bases, baseVersion, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, modelRouteID, upstreamModel, checkTime)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if s.routingVersionsStable(provider, baseVersion, overlayVersion) {
 			assembleStarted := timing.Start()
 			values := assembleRoutingCandidates(provider, quotaMode, bases, overlay)
 			timing.Observe("candidate_assemble", assembleStarted)
@@ -1482,10 +1480,12 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 				return values, nil
 			}
 			timing.Add("candidate_version_retry_before_store", 1)
-			checkTime = time.Now().UTC()
+		} else {
+			timing.Add("candidate_version_retry_after_load", 1)
 		}
-		// Sustained account synchronization must not turn cache churn into user-facing
-		// failures. Fall back to the established authoritative combined query.
+		// Repeating a full provider load while updates keep arriving amplifies first
+		// token latency. On the first version conflict use the authoritative combined
+		// query; do not publish its result as a versioned cache snapshot.
 		timing.Add("candidate_combined_fallback", 1)
 		queryStarted := timing.Start()
 		values, err := s.accounts.ListRoutingCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode)
@@ -1845,6 +1845,13 @@ func (s *Selector) ApplyInvalidation(event repository.InvalidationEvent) {
 		}
 	}
 	s.candidateMu.Unlock()
+	if s.invalidationTiming.Load() {
+		scope := "provider"
+		if provider == "" {
+			scope = "global"
+		}
+		perfmetrics.Default.Inc("selector_cache_invalidation_total", perfmetrics.Labels{Subsystem: "gateway", Operation: string(layer), Provider: string(provider), Stage: string(event.Kind), Outcome: scope})
+	}
 }
 
 func clearRoutingBases(values map[routingBaseCacheKey]routingBaseSnapshot, provider account.Provider) {

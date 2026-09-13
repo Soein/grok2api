@@ -48,22 +48,22 @@ func lockAccountLinkMutationWithTimeout(tx *gorm.DB, timeout time.Duration) erro
 	return err
 }
 
-func linkWebToConsole(tx *gorm.DB, webAccountID, consoleAccountID uint64) error {
+func linkWebToConsole(tx *gorm.DB, webAccountID, consoleAccountID uint64) (bool, error) {
 	var webAccount, consoleAccount accountModel
 	if err := tx.Select("id", "provider").First(&webAccount, webAccountID).Error; err != nil {
-		return err
+		return false, err
 	}
 	if err := tx.Select("id", "provider").First(&consoleAccount, consoleAccountID).Error; err != nil {
-		return err
+		return false, err
 	}
 	if webAccount.Provider != string(account.ProviderWeb) || consoleAccount.Provider != string(account.ProviderConsole) {
-		return repository.ErrConflict
+		return false, repository.ErrConflict
 	}
 	var existing webConsoleAccountLinkModel
 	err := tx.Where("web_account_id = ? OR console_account_id = ?", webAccountID, consoleAccountID).First(&existing).Error
 	if err == nil {
 		if existing.WebAccountID == webAccountID && existing.ConsoleAccountID == consoleAccountID {
-			return nil
+			return false, nil
 		}
 		slog.Debug("account_provider_link_reconcile_skipped",
 			"relation", "web_console",
@@ -73,12 +73,13 @@ func linkWebToConsole(tx *gorm.DB, webAccountID, consoleAccountID uint64) error 
 			"existing_web_account_id", existing.WebAccountID,
 			"existing_console_account_id", existing.ConsoleAccountID,
 		)
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+		return false, err
 	}
-	return tx.Create(&webConsoleAccountLinkModel{WebAccountID: webAccountID, ConsoleAccountID: consoleAccountID, CreatedAt: time.Now().UTC()}).Error
+	result := tx.Create(&webConsoleAccountLinkModel{WebAccountID: webAccountID, ConsoleAccountID: consoleAccountID, CreatedAt: time.Now().UTC()})
+	return result.Error == nil && result.RowsAffected > 0, result.Error
 }
 
 func (r *AccountRepository) UpdateIdentityMetadata(ctx context.Context, accountID uint64, email, userID, teamID string) error {
@@ -110,9 +111,15 @@ func (r *AccountRepository) UpdateIdentityMetadata(ctx context.Context, accountI
 }
 
 // ReconcileProviderLinks 只建立无歧义的高可信关系；已有不同关系和多候选均保持不变。
+// 只有新关系成功提交后才发布跨 Provider 失效通知。
 func (r *AccountRepository) ReconcileProviderLinks(ctx context.Context, accountID uint64) error {
 	if accountID == 0 {
 		return repository.ErrNotFound
+	}
+	changed := false
+	recordChange := func(created bool, err error) error {
+		changed = changed || created
+		return err
 	}
 	err := mapError(r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := lockAccountLinkMutation(tx); err != nil {
@@ -128,39 +135,41 @@ func (r *AccountRepository) ReconcileProviderLinks(ctx context.Context, accountI
 				if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderConsole, "source_key = ?", consoleSource); err != nil {
 					return err
 				} else if found {
-					if err := linkWebToConsole(tx, value.ID, candidate.ID); err != nil {
+					if err := recordChange(linkWebToConsole(tx, value.ID, candidate.ID)); err != nil {
 						return err
 					}
 				}
 			}
-			if err := reconcileWebConsoleByUserID(tx, value, true); err != nil {
+			if err := recordChange(reconcileWebConsoleByUserID(tx, value, true)); err != nil {
 				return err
 			}
-			return reconcileWebBuildByUserID(tx, value, true)
+			return recordChange(reconcileWebBuildByUserID(tx, value, true))
 		case account.ProviderConsole:
 			if webSource, ok := matchingWebSourceKey(value.SourceKey); ok {
 				if candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", account.ProviderWeb, "source_key = ?", webSource); err != nil {
 					return err
 				} else if found {
-					return linkWebToConsole(tx, candidate.ID, value.ID)
+					return recordChange(linkWebToConsole(tx, candidate.ID, value.ID))
 				}
 			}
-			return reconcileWebConsoleByUserID(tx, value, false)
+			return recordChange(reconcileWebConsoleByUserID(tx, value, false))
 		case account.ProviderBuild:
-			return reconcileWebBuildByUserID(tx, value, false)
+			return recordChange(reconcileWebBuildByUserID(tx, value, false))
 		}
 		return nil
 	}))
-	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged, AccountID: accountID})
+	if err == nil && changed {
+		// New links change both providers' routing snapshots. Publish once, only
+		// after the transaction commits; empty account scope keeps this global.
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCredentialChanged})
 	}
 	return err
 }
 
-func reconcileWebConsoleByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool) error {
+func reconcileWebConsoleByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool) (bool, error) {
 	userID := strings.TrimSpace(value.UserID)
 	if userID == "" {
-		return nil
+		return false, nil
 	}
 	provider := account.ProviderWeb
 	if valueIsWeb {
@@ -168,7 +177,7 @@ func reconcileWebConsoleByUserID(tx *gorm.DB, value accountModel, valueIsWeb boo
 	}
 	candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_console", provider, "user_id = ?", userID)
 	if err != nil || !found {
-		return err
+		return false, err
 	}
 	webID, consoleID := candidate.ID, value.ID
 	if valueIsWeb {
@@ -177,10 +186,10 @@ func reconcileWebConsoleByUserID(tx *gorm.DB, value accountModel, valueIsWeb boo
 	return linkWebToConsole(tx, webID, consoleID)
 }
 
-func reconcileWebBuildByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool) error {
+func reconcileWebBuildByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool) (bool, error) {
 	userID := strings.TrimSpace(value.UserID)
 	if userID == "" {
-		return nil
+		return false, nil
 	}
 	provider := account.ProviderWeb
 	if valueIsWeb {
@@ -188,7 +197,7 @@ func reconcileWebBuildByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool)
 	}
 	candidate, found, err := uniqueLinkCandidate(tx, value.ID, "web_build", provider, "user_id = ?", userID)
 	if err != nil || !found {
-		return err
+		return false, err
 	}
 	webID, buildID := candidate.ID, value.ID
 	if valueIsWeb {
@@ -197,7 +206,7 @@ func reconcileWebBuildByUserID(tx *gorm.DB, value accountModel, valueIsWeb bool)
 	return linkWebToBuildIfUnambiguous(tx, webID, buildID)
 }
 
-func linkWebToBuildIfUnambiguous(tx *gorm.DB, webAccountID, buildAccountID uint64) error {
+func linkWebToBuildIfUnambiguous(tx *gorm.DB, webAccountID, buildAccountID uint64) (bool, error) {
 	var existing accountProviderLinkModel
 	err := tx.Where("web_account_id = ? OR build_account_id = ?", webAccountID, buildAccountID).First(&existing).Error
 	if err == nil {
@@ -211,12 +220,13 @@ func linkWebToBuildIfUnambiguous(tx *gorm.DB, webAccountID, buildAccountID uint6
 				"existing_build_account_id", existing.BuildAccountID,
 			)
 		}
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+		return false, err
 	}
-	return tx.Create(&accountProviderLinkModel{WebAccountID: webAccountID, BuildAccountID: buildAccountID, CreatedAt: time.Now().UTC()}).Error
+	result := tx.Create(&accountProviderLinkModel{WebAccountID: webAccountID, BuildAccountID: buildAccountID, CreatedAt: time.Now().UTC()})
+	return result.Error == nil && result.RowsAffected > 0, result.Error
 }
 
 func uniqueLinkCandidate(tx *gorm.DB, sourceAccountID uint64, relation string, provider account.Provider, predicate string, args ...any) (accountModel, bool, error) {

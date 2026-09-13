@@ -282,6 +282,9 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 // Only Build adapters emit the snapshots through their existing async writer.
 func (s *Service) UpdateRequestTimingEnabled(enabled bool) {
 	s.requestTimingEnabled.Store(enabled)
+	if s.selector != nil {
+		s.selector.invalidationTiming.Store(enabled)
+	}
 }
 
 // UpdateBuildForbiddenReauthPolicy atomically replaces the Build account invalidation policy.

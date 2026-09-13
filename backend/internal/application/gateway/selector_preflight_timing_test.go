@@ -52,7 +52,7 @@ func TestSelectorPreflightRecordsVersionChurnFallback(t *testing.T) {
 		t.Fatalf("values=%v error=%v", values, err)
 	}
 	snapshot := timing.Snapshot()
-	if snapshot.Counters["candidate_version_retry_after_load"] != 4 || snapshot.Counters["candidate_combined_fallback"] != 1 || snapshot.Stages["base_query"].Count != 4 || snapshot.Stages["combined_query"].Count != 1 {
+	if snapshot.Counters["candidate_version_retry_after_load"] != 1 || snapshot.Counters["candidate_combined_fallback"] != 1 || snapshot.Stages["base_query"].Count != 1 || snapshot.Stages["combined_query"].Count != 1 {
 		t.Fatalf("missing churn diagnostics: %+v", snapshot)
 	}
 }
