@@ -914,3 +914,14 @@ func TestUpdateRejectsInvalidBuildForbiddenCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyDomainConfigPreservesBuildRequestTiming(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		base := testConfig(t)
+		base.Provider.Build.RequestTimingEnabled = enabled
+		applied := applyDomainConfig(base, toDomainConfig(base))
+		if applied.Provider.Build.RequestTimingEnabled != enabled {
+			t.Fatalf("runtime settings lost static request timing option: want %t", enabled)
+		}
+	}
+}

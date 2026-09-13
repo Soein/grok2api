@@ -215,6 +215,7 @@ type Service struct {
 	videoMaxAttempts            atomic.Int64
 	buildForbiddenReauth        atomic.Pointer[buildForbiddenReauthPolicy]
 	requestTimeout              atomic.Int64
+	requestTimingEnabled        atomic.Bool
 	mediaJobs                   repository.MediaJobRepository
 	mediaAssets                 videoAssetStore
 	mediaQueue                  chan string
@@ -275,6 +276,15 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
+}
+
+// UpdateRequestTimingEnabled controls metadata-only preparation diagnostics.
+// Only Build adapters emit the snapshots through their existing async writer.
+func (s *Service) UpdateRequestTimingEnabled(enabled bool) {
+	s.requestTimingEnabled.Store(enabled)
+	if s.selector != nil {
+		s.selector.invalidationTiming.Store(enabled)
+	}
 }
 
 // UpdateBuildForbiddenReauthPolicy atomically replaces the Build account invalidation policy.
@@ -845,6 +855,10 @@ func (s *Service) selectSchedulableEligibleMediaRouteWithQuotaMode(ctx context.C
 func (s *Service) createResponseAt(ctx context.Context, input Input, path string) (*Result, error) {
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
+	var preflight *infraegress.PreflightTiming
+	if s.requestTimingEnabled.Load() && input.Streaming {
+		ctx, preflight = infraegress.WithPreflightTiming(ctx, startedAt)
+	}
 	var firstToken *firstTokenTimer
 	if input.Streaming {
 		firstToken = newFirstTokenTimer(startedAt)
@@ -861,7 +875,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if input.auditOperation != "" {
 		auditOperation = input.auditOperation
 	}
+	preflightStarted := preflight.Start()
 	routes, aliasEffort, err := s.resolvePublicModelRoutes(ctx, input.PublicModel, input.ClientKey.AllowModelAliases)
+	preflight.Observe("route_resolve", preflightStarted)
 	if input.quotaRecoveryRoute != nil {
 		routes, aliasEffort, err = []modeldomain.Route{*input.quotaRecoveryRoute}, "", nil
 	}
@@ -871,6 +887,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// Select an initial route only to preserve the existing stateful/stateless
 	// previous_response_id boundary. The actual target is chosen from the eligible
 	// pool below after ownership and account availability are known.
+	preflightStarted = preflight.Start()
 	initialRoute, routeErr := s.selectConversationRoute(routes, input.ClientKey, operation, path, false, nil)
 	var ownership *inferencedomain.ResponseOwnership
 	if input.PreviousResponseID != "" && routeErr == nil {
@@ -896,12 +913,14 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		route = orderedRoutes[0]
 	}
 	accountScope := input.ClientKey.AccountScope()
+	preflight.Observe("route_ownership", preflightStarted)
 	var preselectedSession *selectionSession
 	// Skip targets whose account pool is already known to be unavailable. This
 	// gives same-name targets failover before any physical upstream request while
 	// preserving pinned Responses and forced administrator probes.
 	if routeErr == nil && ownership == nil && input.ForcedEgressNodeID == 0 && input.quotaRecoveryLease == nil {
 		for _, candidate := range orderedRoutes {
+			preflightStarted = preflight.Start()
 			affinityKey := ""
 			if candidate.Provider == accountdomain.ProviderBuild {
 				identity := resolveBuildSessionIdentity(
@@ -915,6 +934,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				identity = ensureBuildComposerSessionIdentity(identity, input.ClientKey.ID, candidate.Provider, candidate.UpstreamModel, requestSessionScope)
 				affinityKey = identity.affinityKey
 			}
+			preflight.Observe("preselection_identity", preflightStarted)
+			preflightStarted = preflight.Start()
 			candidateSession, selectionErr := s.selector.beginSelectionSessionForKey(
 				ctx,
 				candidate.Provider,
@@ -926,6 +947,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 				true,
 				accountScope,
 			)
+			preflight.Observe("preselection", preflightStarted)
 			if selectionErr != nil {
 				continue
 			}
@@ -937,7 +959,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	publicModel := modeldomain.ExternalPublicID(route.Provider, route.PublicID)
 	input.PublicModel = publicModel
 	if aliasEffort != "" {
+		preflightStarted = preflight.Start()
 		input.Body, err = rewriteAliasedModel(input.Body, publicModel, aliasEffort, operation)
+		preflight.Observe("alias_rewrite", preflightStarted)
 		if err != nil {
 			return nil, err
 		}
@@ -956,8 +980,10 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if usageKind, _ := s.providers.UsageKind(route.Provider); usageKind == provider.UsageEstimated {
 		usageSource = audit.UsageSourceEstimated
 	}
+	preflightStarted = preflight.Start()
 	mediaSummary, _ := summarizeResponseMedia(input.Body)
 	logResponseMediaSummary(s.logger, input.RequestID, mediaSummary)
+	preflight.Observe("media_summary", preflightStarted)
 	auditBase := audit.Record{
 		EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
 		ClientIP:     requestmeta.ClientIP(ctx),
@@ -978,6 +1004,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		}
 		return nil, clientkeyapp.ErrModelNotAllowed
 	}
+	preflightStarted = preflight.Start()
 	affinityKey := ""
 	ownershipPromptCacheKey := ""
 	reasoningReplayKey := ""
@@ -1014,6 +1041,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			s.logger.Debug("prompt_cache_session_isolated", "request_id", input.RequestID, "model", route.UpstreamModel)
 		}
 	}
+	preflight.Observe("session_identity", preflightStarted)
 	adapter, ok := s.providers.Responses(route.Provider)
 	if !ok {
 		return nil, ErrNoAvailableAccount
@@ -1031,12 +1059,18 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	qualityCrossAccountReplay := canReplayQualityHoldAcrossAccounts(input, ownership)
 	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0 || input.quotaRecoveryLease != nil)
 	idempotencyID, _ := security.NewOpaqueToken(18)
+	preflightStarted = preflight.Start()
 	pricingModel := s.providers.PricingModel(route.Provider, route.UpstreamModel)
 	if err := s.checkLedgerReady(); err != nil {
 		return nil, err
 	}
-	if reservation, priced := audit.EstimateOfficialTextReservation(pricingModel, input.Body); priced {
-		if _, err := s.clientKeys.ReserveBilling(ctx, input.ClientKey, eventID, reservation.CostInUSDTicks, s.textBillingReservationTTL()); err != nil {
+	reservation, priced := audit.EstimateOfficialTextReservation(pricingModel, input.Body)
+	preflight.Observe("billing_estimate", preflightStarted)
+	if priced {
+		preflightStarted = preflight.Start()
+		_, err := s.clientKeys.ReserveBilling(ctx, input.ClientKey, eventID, reservation.CostInUSDTicks, s.textBillingReservationTTL())
+		preflight.Observe("billing_reserve", preflightStarted)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1058,7 +1092,8 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		started := time.Now()
 		responseStartedAt = started
 		lease.markSelectorUpstreamStarted()
-		response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: credential, ForcedEgressNodeID: input.ForcedEgressNodeID, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata})
+		preflight.Add("adapter_calls", 1)
+		response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{RequestID: input.RequestID, Credential: credential, ForcedEgressNodeID: input.ForcedEgressNodeID, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: input.PromptCacheKey, ReasoningReplayKey: reasoningReplayKey, AllowClientToolCacheRoute: input.AllowClientToolCacheRoute, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation), NormalizedMetadata: normalizedMetadata})
 		auditBase.ReasoningEffort = normalizedMetadata.ReasoningEffort
 		err = failureAttempts.captureResponse(credential, started, response, err)
 		timing.markUpstream(time.Since(started))
@@ -1067,6 +1102,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
 		started := time.Now()
 		result, err := s.accounts.EnsureCredential(ctx, credential, force)
+		preflight.Observe("credential", started)
 		failureAttempts.captureCredentialFailure(credential, started, force, err)
 		timing.markCredential(time.Since(started))
 		return result, err
@@ -1268,6 +1304,7 @@ attemptLoop:
 			}
 		}
 		timing.markSelection(time.Since(selectionStarted))
+		preflight.Observe("selection_acquire", selectionStarted)
 		if err != nil {
 			if lastFailure == nil {
 				lastErr = err

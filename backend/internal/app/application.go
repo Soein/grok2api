@@ -83,6 +83,7 @@ type Application struct {
 	accountRepo     repository.AccountRepository
 	modelRepo       repository.ModelRepository
 	providers       *provider.Registry
+	build           *cliprovider.Adapter
 	web             *webprovider.Adapter
 	egress          *infraegress.Manager
 	egressOps       *egressapp.Service
@@ -210,7 +211,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
 	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
-		BaseURL: cfg.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
+		RequestTimingEnabled: cfg.Provider.Build.RequestTimingEnabled,
+		BaseURL:              cfg.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(cfg.Provider.Build.FallbackBaseURL),
 		ClientVersion: cfg.Provider.Build.ClientVersion, ClientIdentifier: cfg.Provider.Build.ClientIdentifier,
 		TokenAuth: cfg.Provider.Build.TokenAuth, UserAgent: cfg.Provider.Build.UserAgent,
 		ResponseHeaderTimeout: cfg.Provider.Build.ResponseHeaderTimeout.Value(),
@@ -354,6 +356,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	modelRepo.SetInvalidationObserver(invalidationService.Notify)
 	clientKeyRepo.SetInvalidationObserver(invalidationService.Notify)
 	gatewayService := gateway.NewService(modelService, auditService, accountService, clientKeyService, providers, selector, responseRepo, cfg.Routing.MaxAttempts)
+	gatewayService.UpdateRequestTimingEnabled(cfg.Provider.Build.RequestTimingEnabled)
 	gatewayService.UpdateQualityRetry(qualityRetryRuntime(cfg.QualityGuard.RequestRetry))
 	gatewayService.UpdateVideoMaxAttempts(cfg.Routing.VideoMaxAttempts)
 	gatewayService.UpdateMarkBuildChatDeniedAsReauth(cfg.Routing.MarkBuildChatDeniedAsReauth)
@@ -401,7 +404,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			pool.UpdateJitter(next.Batch.RandomDelay.Value())
 		}
 		cliAdapter.UpdateConfig(cliprovider.Config{
-			BaseURL: next.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
+			RequestTimingEnabled: next.Provider.Build.RequestTimingEnabled,
+			BaseURL:              next.Provider.Build.BaseURL, FallbackBaseURL: config.NormalizeBuildFallbackBaseURL(next.Provider.Build.FallbackBaseURL),
 			ClientVersion: next.Provider.Build.ClientVersion, ClientIdentifier: next.Provider.Build.ClientIdentifier,
 			TokenAuth: next.Provider.Build.TokenAuth, UserAgent: next.Provider.Build.UserAgent,
 			ResponseHeaderTimeout: next.Provider.Build.ResponseHeaderTimeout.Value(),
@@ -424,6 +428,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.UpdateAccountIsolatedConnections(next.Routing.AccountIsolatedConnections)
 		reasoningReplay.UpdateConfig(reasoningreplay.Config{Enabled: next.Routing.ReasoningReplayEnabled, TTL: next.Routing.ReasoningReplayTTL.Value()})
 		gatewayService.UpdateMaxAttempts(next.Routing.MaxAttempts)
+		gatewayService.UpdateRequestTimingEnabled(next.Provider.Build.RequestTimingEnabled)
 		gatewayService.UpdateQualityRetry(qualityRetryRuntime(next.QualityGuard.RequestRetry))
 		gatewayService.UpdateVideoMaxAttempts(next.Routing.VideoMaxAttempts)
 		gatewayService.UpdateMarkBuildChatDeniedAsReauth(next.Routing.MarkBuildChatDeniedAsReauth)
@@ -453,7 +458,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, build: cliAdapter, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
 		accountRecovery: accountRecoveryService,
 	}, nil
 }
@@ -818,11 +823,17 @@ func (a *Application) logPerformanceMetrics() {
 }
 
 func (a *Application) Close() error {
+	var timingErr error
+	if a.build != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		timingErr = a.build.CloseRequestTimingLogs(ctx)
+		cancel()
+	}
 	var runtimeErr error
 	if a.runtime != nil {
 		runtimeErr = a.runtime.Close()
 	}
-	return errors.Join(runtimeErr, a.database.Close())
+	return errors.Join(timingErr, runtimeErr, a.database.Close())
 }
 
 func (a *Application) runPeriodicTask(ctx context.Context, interval time.Duration, name string, task func(context.Context) error) {

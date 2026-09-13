@@ -172,6 +172,8 @@ type ProviderConfig struct {
 }
 
 type BuildProviderConfig struct {
+	// RequestTimingEnabled emits bounded metadata-only Build stream timing records.
+	RequestTimingEnabled  bool     `yaml:"requestTimingEnabled"`
 	BaseURL               string   `yaml:"baseURL"`
 	FallbackBaseURL       string   `yaml:"fallbackBaseURL"`
 	ClientVersion         string   `yaml:"clientVersion"`

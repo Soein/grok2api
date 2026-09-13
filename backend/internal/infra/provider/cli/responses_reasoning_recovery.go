@@ -133,7 +133,7 @@ func (a *Adapter) recoverReasoningDecodeFailure(
 			_ = original.Body.Close()
 			return responseCall{}, out, retryCall.err
 		}
-		if err := normalizeGzipResponse(retryCall.response); err != nil {
+		if err := normalizeTimedBuildResponse(retryCall); err != nil {
 			_ = retryCall.response.Body.Close()
 			a.logReasoningRecovery(request, base, "encrypted_content", "response_decode_failed", retryCall.response.StatusCode, err)
 			_ = original.Body.Close()
@@ -181,7 +181,7 @@ func (a *Adapter) recoverReasoningDecodeFailure(
 		_ = original.Body.Close()
 		return responseCall{}, out, retryCall.err
 	}
-	if err := normalizeGzipResponse(retryCall.response); err != nil {
+	if err := normalizeTimedBuildResponse(retryCall); err != nil {
 		_ = retryCall.response.Body.Close()
 		a.logReasoningRecovery(request, base, "session_reset", "response_decode_failed", retryCall.response.StatusCode, err)
 		_ = original.Body.Close()

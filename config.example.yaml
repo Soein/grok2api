@@ -200,3 +200,8 @@ qualityGuard:
     idleAccountCooldown: 15m
     minEncryptedBytes: 256
     encryptedBytesPerReasoningToken: 4
+
+provider:
+  build:
+    # [按需修改] 临时记录 Build 流式请求分段耗时；仅时间、事件类型和连接复用信息。
+    requestTimingEnabled: false

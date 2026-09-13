@@ -13,10 +13,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	clientkeydomain "github.com/chenyme/grok2api/backend/internal/domain/clientkey"
+	"github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
 	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
@@ -356,6 +359,7 @@ type Selector struct {
 	segmentedConfig        segmentedSelectorConfig
 	segmentedState         segmentedSelectorState
 	configMu               sync.RWMutex
+	invalidationTiming     atomic.Bool
 	candidateMu            sync.Mutex
 	selectionMu            sync.RWMutex
 	healthMu               sync.RWMutex
@@ -476,6 +480,8 @@ func (s *Selector) invalidateProviderCandidateCache(provider account.Provider) {
 }
 
 func (s *Selector) maybeFilterBotFlagged(ctx context.Context, provider account.Provider, values []account.RoutingCandidate, includeBotFlagged bool) ([]account.RoutingCandidate, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
+	defer timing.Observe("bot_filter", timing.Start())
 	if includeBotFlagged {
 		return values, nil
 	}
@@ -1110,9 +1116,9 @@ func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential accou
 	_ = s.accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{
 		AccountID: credential.ID, UpstreamModel: upstreamModel, Reason: "model_quota_depleted", CooldownUntil: until, UpdatedAt: time.Now().UTC(),
 	})
-	// The model block makes affected bindings ineligible and they are rebound on
-	// the next request. Preserve unrelated model/session affinity for this account.
-	s.invalidateCandidates(credential.Provider)
+	// The model block affects the overlay, not the account base. Apply locally
+	// as well for repositories without an invalidation observer.
+	s.ApplyInvalidation(repository.InvalidationEvent{Kind: repository.InvalidationAccountModelQuotaChanged, Provider: credential.Provider, AccountID: credential.ID, UpstreamModel: upstreamModel})
 }
 
 // MarkModelAccessDenied isolates a permission failure to the rejected model.
@@ -1344,6 +1350,8 @@ func (s *Selector) markFailure(ctx context.Context, credential account.Credentia
 }
 
 func (s *Selector) loadCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time, includeBotFlagged ...bool) ([]account.RoutingCandidate, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
+	defer timing.Observe("candidate_load", timing.Start())
 	include := false
 	if len(includeBotFlagged) > 0 {
 		include = includeBotFlagged[0]
@@ -1355,17 +1363,22 @@ func (s *Selector) loadCandidates(ctx context.Context, provider account.Provider
 }
 
 func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time, includeBotFlagged bool) ([]account.RoutingCandidate, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
 	key := candidateCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel, quotaMode: quotaMode, includeBotFlagged: includeBotFlagged}
 	s.candidateMu.Lock()
 	if snapshot, ok := s.candidates[key]; ok && now.Before(snapshot.expiresAt) {
 		snapshot.lastAccess = now
 		s.candidates[key] = snapshot
 		s.candidateMu.Unlock()
+		timing.Add("candidate_cache_hit", 1)
 		return snapshot.values, nil
 	}
 	s.candidateMu.Unlock()
+	timing.Add("candidate_cache_miss", 1)
 	loadKey := fmt.Sprintf("%s\x00%d\x00%s\x00%s\x00%t", provider, modelRouteID, upstreamModel, quotaMode, includeBotFlagged)
+	sharedStarted := timing.Start()
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
+		timing.Add("candidate_loader_executed", 1)
 		checkTime := time.Now().UTC()
 		var stale candidateSnapshot
 		hasStale := false
@@ -1382,7 +1395,9 @@ func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.
 			}
 		}
 		s.candidateMu.Unlock()
+		queryStarted := timing.Start()
 		values, err := s.accounts.ListRoutingCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode)
+		timing.Observe("combined_query", queryStarted)
 		if err != nil {
 			if hasStale && canUseStaleRoutingSnapshot(ctx, err) {
 				s.candidateMu.Lock()
@@ -1404,6 +1419,7 @@ func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.
 		s.candidateMu.Unlock()
 		return values, nil
 	})
+	timing.Observe("candidate_shared_load", sharedStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -1411,17 +1427,22 @@ func (s *Selector) loadCombinedCandidates(ctx context.Context, provider account.
 }
 
 func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.Provider, modelRouteID uint64, upstreamModel, quotaMode string, now time.Time, includeBotFlagged bool) ([]account.RoutingCandidate, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
 	key := candidateCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel, quotaMode: quotaMode, includeBotFlagged: includeBotFlagged}
 	s.candidateMu.Lock()
 	if snapshot, ok := s.candidates[key]; ok && now.Before(snapshot.expiresAt) {
 		snapshot.lastAccess = now
 		s.candidates[key] = snapshot
 		s.candidateMu.Unlock()
+		timing.Add("candidate_cache_hit", 1)
 		return snapshot.values, nil
 	}
 	s.candidateMu.Unlock()
+	timing.Add("candidate_cache_miss", 1)
 	loadKey := fmt.Sprintf("assembled\x00%s\x00%d\x00%s\x00%s\x00%t", provider, modelRouteID, upstreamModel, quotaMode, includeBotFlagged)
+	sharedStarted := timing.Start()
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
+		timing.Add("candidate_loader_executed", 1)
 		checkTime := time.Now().UTC()
 		s.candidateMu.Lock()
 		if snapshot, ok := s.candidates[key]; ok && checkTime.Before(snapshot.expiresAt) {
@@ -1432,20 +1453,19 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 		}
 		s.candidateMu.Unlock()
 		layered := s.accounts.(repository.RoutingLayerRepository)
-		for attempt := 0; attempt < 4; attempt++ {
-			bases, baseVersion, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
-			if loadErr != nil {
-				return nil, loadErr
-			}
-			overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, modelRouteID, upstreamModel, checkTime)
-			if loadErr != nil {
-				return nil, loadErr
-			}
-			if !s.routingVersionsStable(provider, baseVersion, overlayVersion) {
-				checkTime = time.Now().UTC()
-				continue
-			}
+		bases, baseVersion, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		overlay, overlayVersion, loadErr := s.loadRoutingOverlay(ctx, layered, provider, modelRouteID, upstreamModel, checkTime)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if s.routingVersionsStable(provider, baseVersion, overlayVersion) {
+			assembleStarted := timing.Start()
 			values := assembleRoutingCandidates(provider, quotaMode, bases, overlay)
+			timing.Observe("candidate_assemble", assembleStarted)
+			timing.Add("candidates_assembled", len(values))
 			values, filterErr := s.maybeFilterBotFlagged(ctx, provider, values, includeBotFlagged)
 			if filterErr != nil {
 				return nil, filterErr
@@ -1459,16 +1479,23 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 			if stable {
 				return values, nil
 			}
-			checkTime = time.Now().UTC()
+			timing.Add("candidate_version_retry_before_store", 1)
+		} else {
+			timing.Add("candidate_version_retry_after_load", 1)
 		}
-		// Sustained account synchronization must not turn cache churn into user-facing
-		// failures. Fall back to the established authoritative combined query.
+		// Repeating a full provider load while updates keep arriving amplifies first
+		// token latency. On the first version conflict use the authoritative combined
+		// query; do not publish its result as a versioned cache snapshot.
+		timing.Add("candidate_combined_fallback", 1)
+		queryStarted := timing.Start()
 		values, err := s.accounts.ListRoutingCandidates(ctx, provider, modelRouteID, upstreamModel, quotaMode)
+		timing.Observe("combined_query", queryStarted)
 		if err != nil {
 			return nil, err
 		}
 		return s.maybeFilterBotFlagged(ctx, provider, values, includeBotFlagged)
 	})
+	timing.Observe("candidate_shared_load", sharedStarted)
 	if err != nil {
 		return nil, err
 	}
@@ -1476,6 +1503,8 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 }
 
 func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, quotaMode string, now time.Time) ([]account.RoutingAccountBase, routingLayerVersion, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
+	defer timing.Observe("base_load", timing.Start())
 	key := routingBaseCacheKey{provider: provider, quotaMode: quotaMode}
 	version := s.routingBaseVersion(provider)
 	s.candidateMu.Lock()
@@ -1484,11 +1513,15 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 		s.routingBases[key] = snapshot
 		values := snapshot.values
 		s.candidateMu.Unlock()
+		timing.Add("base_cache_hit", 1)
 		return values, version, nil
 	}
 	s.candidateMu.Unlock()
+	timing.Add("base_cache_miss", 1)
 	loadKey := "base\x00" + string(provider) + "\x00" + quotaMode
+	sharedStarted := timing.Start()
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
+		timing.Add("base_loader_executed", 1)
 		checkTime := time.Now().UTC()
 		checkVersion := s.routingBaseVersion(provider)
 		var stale routingBaseSnapshot
@@ -1507,7 +1540,10 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 			}
 		}
 		s.candidateMu.Unlock()
+		queryStarted := timing.Start()
 		values, loadErr := layered.ListRoutingAccountBases(ctx, provider, quotaMode)
+		timing.Observe("base_query", queryStarted)
+		timing.Add("base_rows_loaded", len(values))
 		if loadErr != nil {
 			if hasStale && canUseStaleRoutingSnapshot(ctx, loadErr) {
 				s.candidateMu.Lock()
@@ -1537,6 +1573,7 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 		s.candidateMu.Unlock()
 		return routingBaseLoadResult{values: values, version: checkVersion}, nil
 	})
+	timing.Observe("base_shared_load", sharedStarted)
 	if err != nil {
 		return nil, routingLayerVersion{}, err
 	}
@@ -1545,6 +1582,8 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 }
 
 func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, modelRouteID uint64, upstreamModel string, now time.Time) (account.RoutingOverlaySnapshot, routingLayerVersion, error) {
+	timing := egress.PreflightTimingFromContext(ctx)
+	defer timing.Observe("overlay_load", timing.Start())
 	key := routingOverlayCacheKey{provider: provider, modelRouteID: modelRouteID, upstreamModel: upstreamModel}
 	version := s.routingOverlayVersion(provider)
 	s.candidateMu.Lock()
@@ -1553,11 +1592,15 @@ func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.Ro
 		s.routingOverlays[key] = snapshot
 		value := snapshot.value
 		s.candidateMu.Unlock()
+		timing.Add("overlay_cache_hit", 1)
 		return value, version, nil
 	}
 	s.candidateMu.Unlock()
+	timing.Add("overlay_cache_miss", 1)
 	loadKey := fmt.Sprintf("overlay\x00%s\x00%d\x00%s", provider, modelRouteID, upstreamModel)
+	sharedStarted := timing.Start()
 	loaded, err, _ := s.candidateLoads.Do(loadKey, func() (any, error) {
+		timing.Add("overlay_loader_executed", 1)
 		checkTime := time.Now().UTC()
 		checkVersion := s.routingOverlayVersion(provider)
 		var stale routingOverlaySnapshot
@@ -1576,7 +1619,9 @@ func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.Ro
 			}
 		}
 		s.candidateMu.Unlock()
+		queryStarted := timing.Start()
 		value, loadErr := layered.ListRoutingAccountOverlays(ctx, provider, modelRouteID, upstreamModel)
+		timing.Observe("overlay_query", queryStarted)
 		if loadErr != nil {
 			if hasStale && canUseStaleRoutingSnapshot(ctx, loadErr) {
 				s.candidateMu.Lock()
@@ -1597,6 +1642,7 @@ func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.Ro
 		s.candidateMu.Unlock()
 		return routingOverlayLoadResult{value: value, version: checkVersion}, nil
 	})
+	timing.Observe("overlay_shared_load", sharedStarted)
 	if err != nil {
 		return account.RoutingOverlaySnapshot{}, routingLayerVersion{}, err
 	}
@@ -1799,6 +1845,13 @@ func (s *Selector) ApplyInvalidation(event repository.InvalidationEvent) {
 		}
 	}
 	s.candidateMu.Unlock()
+	if s.invalidationTiming.Load() {
+		scope := "provider"
+		if provider == "" {
+			scope = "global"
+		}
+		perfmetrics.Default.Inc("selector_cache_invalidation_total", perfmetrics.Labels{Subsystem: "gateway", Operation: string(layer), Provider: string(provider), Stage: string(event.Kind), Outcome: scope})
+	}
 }
 
 func clearRoutingBases(values map[routingBaseCacheKey]routingBaseSnapshot, provider account.Provider) {

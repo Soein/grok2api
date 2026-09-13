@@ -518,9 +518,9 @@ func TestSelectorLayeredCacheSeparatesRoutesSharingUpstream(t *testing.T) {
 	}
 }
 
-func TestSelectorLayeredLoadRetriesInsteadOfMixingVersions(t *testing.T) {
+func TestSelectorLayeredLoadFallsBackInsteadOfMixingVersions(t *testing.T) {
 	repo := newLayeredRepositoryFixture()
-	repo.nextBases = []account.RoutingAccountBase{{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive}}}
+	repo.combined = []account.RoutingCandidate{{Credential: account.Credential{ID: 2, Provider: account.ProviderBuild, Enabled: true, AuthStatus: account.AuthStatusActive}}}
 	repo.overlays["model-a"] = account.RoutingOverlaySnapshot{Values: []account.RoutingAccountOverlay{
 		{AccountID: 1, ModelCapabilityKnown: true, SupportsModel: true},
 		{AccountID: 2, ModelCapabilityKnown: true, SupportsModel: true},
@@ -545,8 +545,8 @@ func TestSelectorLayeredLoadRetriesInsteadOfMixingVersions(t *testing.T) {
 		t.Fatalf("candidates = %#v, err = %v", value.values, value.err)
 	}
 	baseCalls, _ := repo.callCounts("model-a")
-	if baseCalls != 2 {
-		t.Fatalf("base calls = %d, want retry", baseCalls)
+	if baseCalls != 1 || repo.combinedCalls != 1 {
+		t.Fatalf("base calls = %d, combined calls = %d; want one of each", baseCalls, repo.combinedCalls)
 	}
 }
 
@@ -627,7 +627,7 @@ func TestSelectorFallsBackWhenLayerVersionsKeepChanging(t *testing.T) {
 	}
 	repo.mu.Lock()
 	defer repo.mu.Unlock()
-	if repo.baseCalls != 4 || repo.combinedCalls != 1 {
+	if repo.baseCalls != 1 || repo.combinedCalls != 1 {
 		t.Fatalf("base calls=%d combined calls=%d", repo.baseCalls, repo.combinedCalls)
 	}
 }

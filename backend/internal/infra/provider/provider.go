@@ -342,6 +342,8 @@ func normalizeCredentialRefreshErrorCode(code string) string {
 
 // ResponseResourceRequest describes a common upstream request to a Responses resource endpoint.
 type ResponseResourceRequest struct {
+	// RequestID correlates optional timing diagnostics with the gateway audit.
+	RequestID  string
 	Credential account.Credential
 	// ForcedEgressNodeID is set only by administrator quality probes. It lets a
 	// healthy credential test a quarantined node without changing its binding.

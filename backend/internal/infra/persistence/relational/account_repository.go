@@ -28,9 +28,19 @@ func (r *AccountRepository) SetInvalidationObserver(observer repository.Invalida
 }
 
 func (r *AccountRepository) notifyInvalidation(ctx context.Context, event repository.InvalidationEvent) {
-	if r.observer != nil {
-		r.observer(ctx, event)
+	if r.observer == nil {
+		return
 	}
+	if event.Provider == "" && event.AccountID > 0 {
+		// An uncached account still belongs to one provider. Resolve that scope
+		// before notification so unrelated provider pools are not invalidated.
+		var row struct{ Provider account.Provider }
+		if err := r.db.db.WithContext(ctx).Model(&accountModel{}).Select("provider").Where("id = ?", event.AccountID).Take(&row).Error; err == nil {
+			event.Provider = row.Provider
+		}
+		// Missing/deleted accounts and lookup failures retain the global fallback.
+	}
+	r.observer(ctx, event)
 }
 
 type quotaBreakdownJSON struct {
@@ -2158,6 +2168,14 @@ func (r *AccountRepository) UpdateObservedModel(ctx context.Context, id uint64, 
 
 func (r *AccountRepository) UpdateObservedModelIfNewer(ctx context.Context, id uint64, model string, observedAt time.Time) (bool, error) {
 	model = truncate(model, 255)
+	// Refreshing the age of the same observation does not change routing. Keep
+	// the equality and timestamp checks in the UPDATE to avoid a read/write race.
+	refresh := r.db.db.WithContext(ctx).Model(&accountModel{}).
+		Where("id = ? AND COALESCE(observed_model, '') = ? AND observed_model_at <= ? AND observed_model_at <= ?", id, model, observedAt, observedAt.Add(-30*time.Minute)).
+		Update("observed_model_at", observedAt)
+	if refresh.Error != nil || refresh.RowsAffected > 0 {
+		return refresh.RowsAffected > 0, refresh.Error
+	}
 	result := r.db.db.WithContext(ctx).Model(&accountModel{}).
 		Where("id = ? AND (observed_model_at IS NULL OR observed_model_at <= ?) AND (COALESCE(observed_model, '') <> ? OR observed_model_at <= ?)", id, observedAt, model, observedAt.Add(-30*time.Minute)).
 		Updates(map[string]any{"observed_model": model, "observed_model_at": observedAt})
