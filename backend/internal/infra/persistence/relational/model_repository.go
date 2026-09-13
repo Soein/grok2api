@@ -661,6 +661,8 @@ func preferProviderUpstreamRoute(provider account.Provider, upstreamModel string
 	return preferred
 }
 
+// ReplaceAccountCapabilities atomically refreshes the normalized capability set
+// and sync state. Only first success or a changed set invalidates routing.
 func (r *ModelRepository) ReplaceAccountCapabilities(ctx context.Context, accountID uint64, upstreamModels []string, syncedAt time.Time) error {
 	unique := make(map[string]struct{}, len(upstreamModels))
 	rows := make([]accountModelCapabilityModel, 0, len(upstreamModels))
@@ -675,20 +677,50 @@ func (r *ModelRepository) ReplaceAccountCapabilities(ctx context.Context, accoun
 		unique[value] = struct{}{}
 		rows = append(rows, accountModelCapabilityModel{AccountID: accountID, UpstreamModel: value})
 	}
+	changed := true
+	var owner struct{ Provider account.Provider }
 	err := r.db.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("account_id = ?", accountID).Delete(&accountModelCapabilityModel{}).Error; err != nil {
+		// Serialize comparisons for the same account on PostgreSQL, including
+		// first syncs without a state row. SQLite already uses BEGIN IMMEDIATE.
+		if err := tx.Model(&accountModel{}).Select("provider").Where("id = ?", accountID).
+			Clauses(clause.Locking{Strength: "UPDATE"}).Find(&owner).Error; err != nil {
 			return err
 		}
-		if len(rows) > 0 {
-			if err := tx.CreateInBatches(rows, 200).Error; err != nil {
+		var previous accountModelSyncStateModel
+		if err := tx.Select("last_success_at").Where("account_id = ?", accountID).Find(&previous).Error; err != nil {
+			return err
+		}
+		// First success changes capability knowledge even for an empty set.
+		if previous.LastSuccessAt != nil {
+			var existing []string
+			if err := tx.Model(&accountModelCapabilityModel{}).Where("account_id = ?", accountID).Pluck("upstream_model", &existing).Error; err != nil {
 				return err
+			}
+			changed = len(existing) != len(unique)
+			if !changed {
+				for _, value := range existing {
+					if _, ok := unique[value]; !ok {
+						changed = true
+						break
+					}
+				}
+			}
+		}
+		if changed {
+			if err := tx.Where("account_id = ?", accountID).Delete(&accountModelCapabilityModel{}).Error; err != nil {
+				return err
+			}
+			if len(rows) > 0 {
+				if err := tx.CreateInBatches(rows, 200).Error; err != nil {
+					return err
+				}
 			}
 		}
 		state := accountModelSyncStateModel{AccountID: accountID, LastAttemptAt: syncedAt, LastSuccessAt: &syncedAt}
 		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "account_id"}}, DoUpdates: clause.AssignmentColumns([]string{"last_attempt_at", "last_success_at", "last_error"})}).Create(&state).Error
 	})
-	if err == nil {
-		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCapabilityChanged, AccountID: accountID})
+	if err == nil && changed {
+		r.notifyInvalidation(ctx, repository.InvalidationEvent{Kind: repository.InvalidationAccountCapabilityChanged, Provider: owner.Provider, AccountID: accountID})
 	}
 	return err
 }
