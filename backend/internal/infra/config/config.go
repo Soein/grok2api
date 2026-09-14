@@ -254,6 +254,9 @@ type RoutingConfig struct {
 	ReasoningReplayEnabled      bool     `yaml:"reasoningReplayEnabled"`
 	ReasoningReplayTTL          Duration `yaml:"reasoningReplayTTL"`
 	ReasoningReplayMaxEntries   int      `yaml:"reasoningReplayMaxEntries"`
+	BuildBasePreRefreshEnabled  bool     `yaml:"buildBasePreRefreshEnabled"`
+	BuildBasePreRefreshAhead    Duration `yaml:"buildBasePreRefreshAhead"`
+	BuildBasePreRefreshTimeout  Duration `yaml:"buildBasePreRefreshTimeout"`
 	// AutoAssignMaxNodeShare optionally caps how many active accounts one
 	// healthy node may absorb during auto assignment. 0 keeps the historical
 	// unbounded first-pass evacuation. Values in [0.05, 1] are a fraction of
@@ -713,6 +716,12 @@ func (c Config) Validate() error {
 	if c.Routing.ReasoningReplayMaxEntries < 100 || c.Routing.ReasoningReplayMaxEntries > 1000000 {
 		return errors.New("routing.reasoningReplayMaxEntries 必须在 100 到 1000000 之间")
 	}
+	if c.Routing.BuildBasePreRefreshAhead.Value() <= 0 || c.Routing.BuildBasePreRefreshAhead.Value() > 15*time.Second {
+		return errors.New("routing.buildBasePreRefreshAhead 必须在 1 纳秒到 15 秒之间")
+	}
+	if c.Routing.BuildBasePreRefreshTimeout.Value() <= 0 || c.Routing.BuildBasePreRefreshTimeout.Value() > 30*time.Second {
+		return errors.New("routing.buildBasePreRefreshTimeout 必须在 1 纳秒到 30 秒之间")
+	}
 	if !validAutoAssignShare(c.Routing.AutoAssignMaxNodeShare) || !validAutoAssignShare(c.Routing.AutoAssignMaxMigrationShare) {
 		return errors.New("routing.autoAssignMaxNodeShare 与 autoAssignMaxMigrationShare 必须为 0 或 0.05 到 1 之间")
 	}
@@ -999,6 +1008,9 @@ func defaultConfig() Config {
 			ReasoningReplayEnabled:      true,
 			ReasoningReplayTTL:          Duration(time.Hour),
 			ReasoningReplayMaxEntries:   10240,
+			BuildBasePreRefreshEnabled:  true,
+			BuildBasePreRefreshAhead:    Duration(5 * time.Second),
+			BuildBasePreRefreshTimeout:  Duration(5 * time.Second),
 		},
 		Audit: AuditConfig{
 			BufferSize: 16384, BatchSize: 256, FlushInterval: Duration(250 * time.Millisecond), CommitDelay: Duration(5 * time.Millisecond),

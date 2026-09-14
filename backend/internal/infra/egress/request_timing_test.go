@@ -209,3 +209,163 @@ func TestRequestTimingLogicalCallRetryCountersAndPlane(t *testing.T) {
 		t.Fatal("retry metadata leaked")
 	}
 }
+
+func TestRequestTimingReadBoundarySnapshotDetachedPointersAndFiniteMetadata(t *testing.T) {
+	ctx, root := WithRequestTiming(context.Background())
+	_, c := BeginTimingCall(ctx)
+
+	c.RecordResponseMetadata("secret-sentinel-encoding", "secret-proto", 99, true)
+	now := time.Now()
+	c.RecordRawBodyReadStart(now)
+	c.RecordRawBodyReadDone(now)
+	c.RecordGzipInitStart(now)
+	c.RecordGzipInitEnd(now)
+	c.RecordDecodedBodyReadStart(now)
+
+	s := root.Snapshot()
+	call := s.Calls[0]
+
+	if call.ContentEncoding != "other" {
+		t.Fatalf("expected other content encoding, got %q", call.ContentEncoding)
+	}
+	if call.Protocol != "other" {
+		t.Fatalf("expected other protocol, got %q", call.Protocol)
+	}
+	if !call.Uncompressed {
+		t.Fatalf("expected uncompressed true")
+	}
+
+	for name, ptr := range map[string]*float64{
+		"FirstRawBodyReadStartMS":     call.FirstRawBodyReadStartMS,
+		"FirstRawBodyReadDoneMS":      call.FirstRawBodyReadDoneMS,
+		"GzipInitStartMS":             call.GzipInitStartMS,
+		"GzipInitEndMS":               call.GzipInitEndMS,
+		"FirstDecodedBodyReadStartMS": call.FirstDecodedBodyReadStartMS,
+	} {
+		if ptr == nil {
+			t.Fatalf("expected %s to be non-nil", name)
+		}
+	}
+
+	// Mutate detached pointers
+	*call.FirstRawBodyReadStartMS = -999
+	*call.FirstRawBodyReadDoneMS = -999
+	*call.GzipInitStartMS = -999
+	*call.GzipInitEndMS = -999
+	*call.FirstDecodedBodyReadStartMS = -999
+
+	second := root.Snapshot().Calls[0]
+	if *second.FirstRawBodyReadStartMS < 0 || *second.FirstRawBodyReadDoneMS < 0 ||
+		*second.GzipInitStartMS < 0 || *second.GzipInitEndMS < 0 ||
+		*second.FirstDecodedBodyReadStartMS < 0 {
+		t.Fatal("mutating snapshot pointers affected subsequent snapshot")
+	}
+
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret-sentinel") || strings.Contains(string(encoded), "secret-proto") {
+		t.Fatal("metadata leaked secrets into JSON")
+	}
+}
+
+func TestRequestTimingFiniteMetadataClasses(t *testing.T) {
+	for _, tc := range []struct {
+		encoding     string
+		wantEncoding string
+		proto        string
+		protoMajor   int
+		wantProto    string
+	}{
+		{"gzip", "gzip", "HTTP/1.1", 1, "http1"},
+		{"GZIP", "gzip", "http/1.0", 1, "http1"},
+		{"identity", "identity", "HTTP/2.0", 2, "http2"},
+		{"", "identity", "http/2", 0, "http2"},
+		{"br", "other", "HTTP/3.0", 3, "other"},
+		{"secret", "other", "spdy", 0, "other"},
+	} {
+		ctx, root := WithRequestTiming(context.Background())
+		_, c := BeginTimingCall(ctx)
+		c.RecordResponseMetadata(tc.encoding, tc.proto, tc.protoMajor, false)
+		s := root.Snapshot().Calls[0]
+		if s.ContentEncoding != tc.wantEncoding {
+			t.Errorf("encoding %q: got %q, want %q", tc.encoding, s.ContentEncoding, tc.wantEncoding)
+		}
+		if s.Protocol != tc.wantProto {
+			t.Errorf("proto %q (%d): got %q, want %q", tc.proto, tc.protoMajor, s.Protocol, tc.wantProto)
+		}
+	}
+}
+
+func TestRequestTimingConcurrentReadBoundaryRecords(t *testing.T) {
+	ctx, root := WithRequestTiming(context.Background())
+	_, c := BeginTimingCall(ctx)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			now := time.Now()
+			c.RecordResponseMetadata("gzip", "HTTP/1.1", 1, false)
+			c.RecordRawBodyReadStart(now)
+			c.RecordRawBodyReadDone(now)
+			c.RecordGzipInitStart(now)
+			c.RecordGzipInitEnd(now)
+			c.RecordDecodedBodyReadStart(now)
+			_ = root.Snapshot()
+		}()
+	}
+	wg.Wait()
+	s := root.Snapshot().Calls[0]
+	if s.FirstRawBodyReadStartMS == nil || s.FirstRawBodyReadDoneMS == nil ||
+		s.GzipInitStartMS == nil || s.GzipInitEndMS == nil ||
+		s.FirstDecodedBodyReadStartMS == nil {
+		t.Fatalf("missing concurrent observations: %+v", s)
+	}
+}
+
+func TestRequestTimingReadBoundaryContentionLegacyMutex(t *testing.T) {
+	ctx, root := WithRequestTiming(context.Background())
+	_, c := BeginTimingCall(ctx)
+
+	// Deliberately hold the legacy CallTiming mutex.
+	c.mu.Lock()
+
+	recorded := make(chan struct{})
+	now := time.Now()
+	go func() {
+		c.RecordRawBodyReadStart(now)
+		c.RecordRawBodyReadDone(now)
+		c.RecordGzipInitStart(now)
+		c.RecordGzipInitEnd(now)
+		c.RecordDecodedBodyReadStart(now)
+		close(recorded)
+	}()
+
+	select {
+	case <-recorded:
+	case <-time.After(100 * time.Millisecond):
+		c.mu.Unlock()
+		t.Fatal("recording boundary markers waited on held legacy CallTiming mutex")
+	}
+
+	c.mu.Unlock()
+
+	s := root.Snapshot().Calls[0]
+	expectedMS := milliseconds(now.Sub(c.start))
+	for name, ptr := range map[string]*float64{
+		"FirstRawBodyReadStartMS":     s.FirstRawBodyReadStartMS,
+		"FirstRawBodyReadDoneMS":      s.FirstRawBodyReadDoneMS,
+		"GzipInitStartMS":             s.GzipInitStartMS,
+		"GzipInitEndMS":               s.GzipInitEndMS,
+		"FirstDecodedBodyReadStartMS": s.FirstDecodedBodyReadStartMS,
+	} {
+		if ptr == nil {
+			t.Fatalf("expected %s to be non-nil after unlock", name)
+		}
+		if *ptr != expectedMS {
+			t.Fatalf("%s mismatch: got %v, want %v", name, *ptr, expectedMS)
+		}
+	}
+}

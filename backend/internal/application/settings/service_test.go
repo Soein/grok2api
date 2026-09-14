@@ -925,3 +925,86 @@ func TestApplyDomainConfigPreservesBuildRequestTiming(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyDomainConfigPreservesBuildBasePreRefreshFields(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled bool
+		ahead   time.Duration
+		timeout time.Duration
+	}{
+		{
+			name:    "defaults preserved",
+			enabled: true,
+			ahead:   5 * time.Second,
+			timeout: 5 * time.Second,
+		},
+		{
+			name:    "explicit false preserved",
+			enabled: false,
+			ahead:   5 * time.Second,
+			timeout: 5 * time.Second,
+		},
+		{
+			name:    "custom durations preserved",
+			enabled: true,
+			ahead:   10 * time.Second,
+			timeout: 12 * time.Second,
+		},
+		{
+			name:    "explicit false with custom durations preserved",
+			enabled: false,
+			ahead:   8 * time.Second,
+			timeout: 15 * time.Second,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := testConfig(t)
+			base.Routing.BuildBasePreRefreshEnabled = tc.enabled
+			base.Routing.BuildBasePreRefreshAhead = config.Duration(tc.ahead)
+			base.Routing.BuildBasePreRefreshTimeout = config.Duration(tc.timeout)
+
+			applied := applyDomainConfig(base, toDomainConfig(base))
+			if applied.Routing.BuildBasePreRefreshEnabled != tc.enabled {
+				t.Fatalf("expected enabled=%t, got %t", tc.enabled, applied.Routing.BuildBasePreRefreshEnabled)
+			}
+			if applied.Routing.BuildBasePreRefreshAhead.Value() != tc.ahead {
+				t.Fatalf("expected ahead=%v, got %v", tc.ahead, applied.Routing.BuildBasePreRefreshAhead.Value())
+			}
+			if applied.Routing.BuildBasePreRefreshTimeout.Value() != tc.timeout {
+				t.Fatalf("expected timeout=%v, got %v", tc.timeout, applied.Routing.BuildBasePreRefreshTimeout.Value())
+			}
+
+			// Also verify LoadPersisted and ReloadPersisted preserve them
+			repo := &runtimeSettingsRepositoryStub{
+				value:    toDomainConfig(base),
+				revision: 1,
+				found:    true,
+			}
+			loaded, _, _, err := LoadPersisted(context.Background(), base, repo)
+			if err != nil {
+				t.Fatalf("LoadPersisted failed: %v", err)
+			}
+			if loaded.Routing.BuildBasePreRefreshEnabled != tc.enabled ||
+				loaded.Routing.BuildBasePreRefreshAhead.Value() != tc.ahead ||
+				loaded.Routing.BuildBasePreRefreshTimeout.Value() != tc.timeout {
+				t.Fatalf("LoadPersisted did not preserve fields: %#v", loaded.Routing)
+			}
+
+			var reloaded config.Config
+			svc := NewService(base, time.Time{}, 0, repo, nil, func(next config.Config) {
+				reloaded = next
+			})
+			if err := svc.ReloadPersisted(context.Background()); err != nil {
+				t.Fatalf("ReloadPersisted failed: %v", err)
+			}
+			if reloaded.Routing.BuildBasePreRefreshEnabled != tc.enabled ||
+				reloaded.Routing.BuildBasePreRefreshAhead.Value() != tc.ahead ||
+				reloaded.Routing.BuildBasePreRefreshTimeout.Value() != tc.timeout {
+				t.Fatalf("ReloadPersisted did not preserve fields: %#v", reloaded.Routing)
+			}
+		})
+	}
+}

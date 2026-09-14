@@ -8,6 +8,7 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,6 +56,14 @@ type CallTiming struct {
 	firstLine      bool
 	hasData        bool
 	eventType      string
+
+	// Atomic read-boundary diagnostics (nonblocking, safe from contention):
+	rawReadStart     atomic.Pointer[float64]
+	rawReadDone      atomic.Pointer[float64]
+	gzipInitStart    atomic.Pointer[float64]
+	gzipInitEnd      atomic.Pointer[float64]
+	decodedReadStart atomic.Pointer[float64]
+	meta             atomic.Pointer[responseMetadata]
 }
 
 // RequestTimingSnapshot is a detached copy safe for structured logging.
@@ -99,6 +108,25 @@ type CallTimingSnapshot struct {
 	FirstSSEEventType      string   `json:"first_sse_event_type,omitempty"`
 	FirstTextDeltaMS       *float64 `json:"first_text_ms"`
 	FirstReasoningDeltaMS  *float64 `json:"first_reasoning_ms"`
+
+	// Read boundary diagnostics:
+	// ContentEncoding is the finite class ("identity", "gzip", "other") of the HTTP response.
+	// Protocol is the finite class ("http1", "http2", "other") of the HTTP response.
+	// Uncompressed reports whether net/http transport decompressed the body before returning
+	// (Uncompressed true means client received transparently decompressed stream, not raw wire gzip).
+	// FirstRawBodyReadStartMS marks entry into the first Read on the response Body returned by net/http
+	// before any adapter gzip normalization. This reflects client-visible read initiation, not wire arrival.
+	// FirstRawBodyReadDoneMS marks the first return of n > 0 bytes from that raw body Read.
+	// GzipInitStartMS and GzipInitEndMS bound gzip.NewReader initialization when Content-Encoding is gzip.
+	// FirstDecodedBodyReadStartMS marks entry into the first Read on the decoded body presented to the caller.
+	ContentEncoding             string   `json:"content_encoding,omitempty"`
+	Protocol                    string   `json:"protocol,omitempty"`
+	Uncompressed                bool     `json:"uncompressed,omitempty"`
+	FirstRawBodyReadStartMS     *float64 `json:"first_raw_body_read_start_ms"`
+	FirstRawBodyReadDoneMS      *float64 `json:"first_raw_body_read_done_ms"`
+	GzipInitStartMS             *float64 `json:"gzip_init_start_ms"`
+	GzipInitEndMS               *float64 `json:"gzip_init_end_ms"`
+	FirstDecodedBodyReadStartMS *float64 `json:"first_decoded_body_read_start_ms"`
 }
 
 // WithRequestTiming enables timing once. A nil context leaves timing disabled.
@@ -431,6 +459,117 @@ func (c *CallTiming) observeEvent(ms float64) {
 	}
 }
 
+type responseMetadata struct {
+	contentEncoding string
+	protocol        string
+	uncompressed    bool
+}
+
+// RecordResponseMetadata captures bounded protocol and encoding metadata for
+// an HTTP response. Arbitrary header values and URLs are never recorded.
+func (c *CallTiming) RecordResponseMetadata(contentEncoding, proto string, protoMajor int, uncompressed bool) {
+	if c == nil {
+		return
+	}
+	m := &responseMetadata{
+		contentEncoding: safeContentEncodingClass(contentEncoding),
+		protocol:        safeProtocolClass(proto, protoMajor),
+		uncompressed:    uncompressed,
+	}
+	c.meta.Store(m)
+}
+
+func recordAtomicTiming(target *atomic.Pointer[float64], start time.Time, observedAt time.Time) {
+	if target.Load() != nil {
+		return
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	ms := milliseconds(observedAt.Sub(start))
+	target.CompareAndSwap(nil, &ms)
+}
+
+func loadDetachedTiming(dst **float64, src *atomic.Pointer[float64]) {
+	if p := src.Load(); p != nil {
+		v := *p
+		*dst = &v
+	} else if *dst != nil {
+		v := **dst
+		*dst = &v
+	}
+}
+
+// RecordRawBodyReadStart marks entry into the first Read on the raw HTTP response body.
+// Recording is nonblocking and does not acquire legacy timing locks.
+func (c *CallTiming) RecordRawBodyReadStart(observedAt time.Time) {
+	if c == nil {
+		return
+	}
+	recordAtomicTiming(&c.rawReadStart, c.start, observedAt)
+}
+
+// RecordRawBodyReadDone marks the first return of n > 0 bytes from the raw response body.
+func (c *CallTiming) RecordRawBodyReadDone(observedAt time.Time) {
+	if c == nil {
+		return
+	}
+	recordAtomicTiming(&c.rawReadDone, c.start, observedAt)
+}
+
+// RecordGzipInitStart marks the start of gzip normalization (gzip.NewReader).
+func (c *CallTiming) RecordGzipInitStart(observedAt time.Time) {
+	if c == nil {
+		return
+	}
+	recordAtomicTiming(&c.gzipInitStart, c.start, observedAt)
+}
+
+// RecordGzipInitEnd marks the completion of gzip normalization, even on failure.
+func (c *CallTiming) RecordGzipInitEnd(observedAt time.Time) {
+	if c == nil {
+		return
+	}
+	recordAtomicTiming(&c.gzipInitEnd, c.start, observedAt)
+}
+
+// RecordDecodedBodyReadStart marks entry into the first Read on the decoded body.
+func (c *CallTiming) RecordDecodedBodyReadStart(observedAt time.Time) {
+	if c == nil {
+		return
+	}
+	recordAtomicTiming(&c.decodedReadStart, c.start, observedAt)
+}
+
+func safeContentEncodingClass(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "identity":
+		return "identity"
+	case "gzip":
+		return "gzip"
+	default:
+		return "other"
+	}
+}
+
+func safeProtocolClass(proto string, protoMajor int) string {
+	switch protoMajor {
+	case 1:
+		return "http1"
+	case 2:
+		return "http2"
+	}
+	normalized := strings.ToLower(strings.TrimSpace(proto))
+	switch {
+	case strings.HasPrefix(normalized, "http/1.") || normalized == "http/1":
+		return "http1"
+	case strings.HasPrefix(normalized, "http/2.") || normalized == "http/2" || normalized == "h2":
+		return "http2"
+	default:
+		return "other"
+	}
+}
+
 func safeTimingEventType(kind string) string {
 	switch kind {
 	case "response.created", "response.in_progress", "response.completed", "response.failed", "response.output_item.added", "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta":
@@ -459,12 +598,26 @@ func (r *RequestTiming) Snapshot() RequestTimingSnapshot {
 	for _, c := range r.calls {
 		c.mu.Lock()
 		s := c.snapshot
-		for _, ptr := range []**float64{&s.ConnectionAcquireMS, &s.ConnectMS, &s.TLSMS, &s.WroteRequestMS, &s.FirstResponseByteMS, &s.TransportReturnedMS, &s.HTTPReturnedMS, &s.FirstBodyByteMS, &s.FirstSSEEventMS, &s.FirstTextDeltaMS, &s.FirstReasoningDeltaMS} {
+		for _, ptr := range []**float64{
+			&s.ConnectionAcquireMS, &s.ConnectMS, &s.TLSMS, &s.WroteRequestMS,
+			&s.FirstResponseByteMS, &s.TransportReturnedMS, &s.HTTPReturnedMS,
+			&s.FirstBodyByteMS, &s.FirstSSEEventMS, &s.FirstTextDeltaMS, &s.FirstReasoningDeltaMS,
+		} {
 			if *ptr != nil {
 				value := **ptr
 				*ptr = &value
 			}
 		}
+		if m := c.meta.Load(); m != nil {
+			s.ContentEncoding = m.contentEncoding
+			s.Protocol = m.protocol
+			s.Uncompressed = m.uncompressed
+		}
+		loadDetachedTiming(&s.FirstRawBodyReadStartMS, &c.rawReadStart)
+		loadDetachedTiming(&s.FirstRawBodyReadDoneMS, &c.rawReadDone)
+		loadDetachedTiming(&s.GzipInitStartMS, &c.gzipInitStart)
+		loadDetachedTiming(&s.GzipInitEndMS, &c.gzipInitEnd)
+		loadDetachedTiming(&s.FirstDecodedBodyReadStartMS, &c.decodedReadStart)
 		c.mu.Unlock()
 		result.Calls = append(result.Calls, s)
 	}

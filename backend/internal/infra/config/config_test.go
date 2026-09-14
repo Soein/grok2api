@@ -166,6 +166,9 @@ bootstrapAdmin:
 	if !cfg.Routing.ReasoningReplayEnabled || cfg.Routing.ReasoningReplayTTL.Value() != time.Hour || cfg.Routing.ReasoningReplayMaxEntries != 10240 {
 		t.Fatalf("reasoning replay defaults = %#v", cfg.Routing)
 	}
+	if !cfg.Routing.BuildBasePreRefreshEnabled || cfg.Routing.BuildBasePreRefreshAhead.Value() != 5*time.Second || cfg.Routing.BuildBasePreRefreshTimeout.Value() != 5*time.Second {
+		t.Fatalf("build base pre-refresh defaults = %#v", cfg.Routing)
+	}
 	if cfg.Audit.CommitDelay.Value() != 5*time.Millisecond {
 		t.Fatalf("audit commit delay = %s", cfg.Audit.CommitDelay.Value())
 	}
@@ -487,6 +490,69 @@ func TestValidateRejectsInvalidSegmentedSelectorConfig(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("case %d accepted invalid segmented selector config", index)
 		}
+	}
+}
+
+func TestRoutingBuildBasePreRefreshExplicitFalse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+routing:
+  buildBasePreRefreshEnabled: false
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Routing.BuildBasePreRefreshEnabled {
+		t.Fatal("expected buildBasePreRefreshEnabled to be false when explicitly set")
+	}
+}
+
+func TestRoutingBuildBasePreRefreshValidation(t *testing.T) {
+	invalidCases := []struct {
+		name   string
+		mutate func(*RoutingConfig)
+	}{
+		{
+			name:   "ahead zero",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshAhead = Duration(0) },
+		},
+		{
+			name:   "ahead negative",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshAhead = Duration(-1 * time.Second) },
+		},
+		{
+			name:   "ahead exceeds 15s",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshAhead = Duration(15*time.Second + time.Millisecond) },
+		},
+		{
+			name:   "timeout zero",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshTimeout = Duration(0) },
+		},
+		{
+			name:   "timeout negative",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshTimeout = Duration(-1 * time.Second) },
+		},
+		{
+			name:   "timeout exceeds 30s",
+			mutate: func(c *RoutingConfig) { c.BuildBasePreRefreshTimeout = Duration(30*time.Second + time.Millisecond) },
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Secrets.JWTSecret = "12345678901234567890123456789012"
+			cfg.Secrets.CredentialEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			tc.mutate(&cfg.Routing)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("expected validation error for %s, got nil", tc.name)
+			}
+		})
 	}
 }
 

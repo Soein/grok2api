@@ -407,7 +407,10 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		SegmentedMinCandidates:      segmentedMinCandidates,
 		SegmentedWindowSize:         segmentedWindowSize,
 		ReasoningReplayEnabled:      base.Routing.ReasoningReplayEnabled, ReasoningReplayTTL: base.Routing.ReasoningReplayTTL,
-		ReasoningReplayMaxEntries: base.Routing.ReasoningReplayMaxEntries,
+		ReasoningReplayMaxEntries:  base.Routing.ReasoningReplayMaxEntries,
+		BuildBasePreRefreshEnabled: base.Routing.BuildBasePreRefreshEnabled,
+		BuildBasePreRefreshAhead:   base.Routing.BuildBasePreRefreshAhead,
+		BuildBasePreRefreshTimeout: base.Routing.BuildBasePreRefreshTimeout,
 	}
 	commitDelay := base.Audit.CommitDelay.Value()
 	if value.Audit.CommitDelay > 0 {
