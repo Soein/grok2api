@@ -206,6 +206,7 @@ type routingBaseSnapshot struct {
 	expiresAt  time.Time
 	staleUntil time.Time
 	lastAccess time.Time
+	generation uint64
 }
 
 type routingOverlaySnapshot struct {
@@ -347,43 +348,50 @@ func (l *accountLease) completeSelectorObservation(success bool) {
 
 // Selector 实现可替换的 balanced 账号选择策略。
 type Selector struct {
-	accounts               repository.AccountRepository
-	concurrency            repository.ConcurrencyLimiter
-	sticky                 repository.StickySessionRepository
-	stickyTTL              time.Duration
-	cooldownBase           time.Duration
-	cooldownMax            time.Duration
-	capacityWait           time.Duration
-	preferFreeBuild        bool
-	excludeBuildBotFlagged bool
-	segmentedConfig        segmentedSelectorConfig
-	segmentedState         segmentedSelectorState
-	configMu               sync.RWMutex
-	invalidationTiming     atomic.Bool
-	candidateMu            sync.Mutex
-	selectionMu            sync.RWMutex
-	healthMu               sync.RWMutex
-	quotaMu                sync.RWMutex
-	staleLogMu             sync.Mutex
-	logger                 *slog.Logger
-	leaseWakeMu            sync.Mutex
-	leaseWake              chan struct{}
-	lastSelectedAt         map[uint64]time.Time
-	lastSuccessAt          map[uint64]time.Time
-	healthOverrides        map[uint64]routingHealthOverride
-	quotaConsumed          map[quotaConsumptionKey]int
-	staleFallbackLoggedAt  map[string]time.Time
-	candidates             map[candidateCacheKey]candidateSnapshot
-	routingBases           map[routingBaseCacheKey]routingBaseSnapshot
-	routingOverlays        map[routingOverlayCacheKey]routingOverlaySnapshot
-	routingAccountProvider map[uint64]account.Provider
-	baseGlobalVersion      uint64
-	overlayGlobalVersion   uint64
-	baseProviderVersion    map[account.Provider]uint64
-	overlayProviderVersion map[account.Provider]uint64
-	candidateLoads         singleflight.Group
-	concurrencySnapshots   *resultcache.Cache[[32]byte, map[string]int]
-	tierOrders             interface {
+	accounts                      repository.AccountRepository
+	concurrency                   repository.ConcurrencyLimiter
+	sticky                        repository.StickySessionRepository
+	stickyTTL                     time.Duration
+	cooldownBase                  time.Duration
+	cooldownMax                   time.Duration
+	capacityWait                  time.Duration
+	preferFreeBuild               bool
+	excludeBuildBotFlagged        bool
+	buildBasePreRefreshEnabled    bool
+	buildBasePreRefreshAhead      time.Duration
+	buildBasePreRefreshTimeout    time.Duration
+	buildBasePreRefreshGeneration uint64
+	buildBasePreRefreshRetryUntil time.Time
+	buildBasePreRefreshRunning    atomic.Bool
+	routingBaseGeneration         uint64
+	segmentedConfig               segmentedSelectorConfig
+	segmentedState                segmentedSelectorState
+	configMu                      sync.RWMutex
+	invalidationTiming            atomic.Bool
+	candidateMu                   sync.Mutex
+	selectionMu                   sync.RWMutex
+	healthMu                      sync.RWMutex
+	quotaMu                       sync.RWMutex
+	staleLogMu                    sync.Mutex
+	logger                        *slog.Logger
+	leaseWakeMu                   sync.Mutex
+	leaseWake                     chan struct{}
+	lastSelectedAt                map[uint64]time.Time
+	lastSuccessAt                 map[uint64]time.Time
+	healthOverrides               map[uint64]routingHealthOverride
+	quotaConsumed                 map[quotaConsumptionKey]int
+	staleFallbackLoggedAt         map[string]time.Time
+	candidates                    map[candidateCacheKey]candidateSnapshot
+	routingBases                  map[routingBaseCacheKey]routingBaseSnapshot
+	routingOverlays               map[routingOverlayCacheKey]routingOverlaySnapshot
+	routingAccountProvider        map[uint64]account.Provider
+	baseGlobalVersion             uint64
+	overlayGlobalVersion          uint64
+	baseProviderVersion           map[account.Provider]uint64
+	overlayProviderVersion        map[account.Provider]uint64
+	candidateLoads                singleflight.Group
+	concurrencySnapshots          *resultcache.Cache[[32]byte, map[string]int]
+	tierOrders                    interface {
 		TierOrder(account.Provider, string) []account.WebTier
 	}
 }
@@ -395,7 +403,7 @@ func NewSelector(accounts repository.AccountRepository, concurrency repository.C
 	if len(capacityWait) > 0 && capacityWait[0] > 0 {
 		wait = capacityWait[0]
 	}
-	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, leaseWake: make(chan struct{}), logger: slog.Default(), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), healthOverrides: make(map[uint64]routingHealthOverride), quotaConsumed: make(map[quotaConsumptionKey]int), staleFallbackLoggedAt: make(map[string]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), routingBases: make(map[routingBaseCacheKey]routingBaseSnapshot), routingOverlays: make(map[routingOverlayCacheKey]routingOverlaySnapshot), routingAccountProvider: make(map[uint64]account.Provider), baseProviderVersion: make(map[account.Provider]uint64), overlayProviderVersion: make(map[account.Provider]uint64), concurrencySnapshots: resultcache.New[[32]byte, map[string]int](maxConcurrencySnapshots, concurrencySnapshotTTL)}
+	return &Selector{accounts: accounts, concurrency: concurrency, sticky: sticky, tierOrders: tierOrders, stickyTTL: stickyTTL, cooldownBase: cooldownBase, cooldownMax: cooldownMax, capacityWait: wait, buildBasePreRefreshEnabled: true, buildBasePreRefreshAhead: defaultBuildBasePreRefreshAhead, buildBasePreRefreshTimeout: defaultBuildBasePreRefreshTimeout, leaseWake: make(chan struct{}), logger: slog.Default(), lastSelectedAt: make(map[uint64]time.Time), lastSuccessAt: make(map[uint64]time.Time), healthOverrides: make(map[uint64]routingHealthOverride), quotaConsumed: make(map[quotaConsumptionKey]int), staleFallbackLoggedAt: make(map[string]time.Time), candidates: make(map[candidateCacheKey]candidateSnapshot), routingBases: make(map[routingBaseCacheKey]routingBaseSnapshot), routingOverlays: make(map[routingOverlayCacheKey]routingOverlaySnapshot), routingAccountProvider: make(map[uint64]account.Provider), baseProviderVersion: make(map[account.Provider]uint64), overlayProviderVersion: make(map[account.Provider]uint64), concurrencySnapshots: resultcache.New[[32]byte, map[string]int](maxConcurrencySnapshots, concurrencySnapshotTTL)}
 }
 
 // SetLogger wires the application logger into routing degradation diagnostics.
@@ -1453,7 +1461,7 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 		}
 		s.candidateMu.Unlock()
 		layered := s.accounts.(repository.RoutingLayerRepository)
-		bases, baseVersion, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
+		bases, baseVersion, baseExpiresAt, loadErr := s.loadRoutingBases(ctx, layered, provider, quotaMode, checkTime)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -1473,7 +1481,11 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 			s.candidateMu.Lock()
 			stable := baseVersion == s.routingBaseVersionLocked(provider) && overlayVersion == s.routingOverlayVersionLocked(provider)
 			if stable {
-				s.storeCandidateSnapshotLocked(key, newCandidateSnapshot(values, checkTime.Add(candidateCacheTTL)), checkTime)
+				candidateExpiresAt := checkTime.Add(candidateCacheTTL)
+				if provider == account.ProviderBuild && quotaMode == "" && !baseExpiresAt.IsZero() && baseExpiresAt.Before(candidateExpiresAt) {
+					candidateExpiresAt = baseExpiresAt
+				}
+				s.storeCandidateSnapshotLocked(key, newCandidateSnapshot(values, candidateExpiresAt), checkTime)
 			}
 			s.candidateMu.Unlock()
 			if stable {
@@ -1502,7 +1514,7 @@ func (s *Selector) loadLayeredCandidates(ctx context.Context, provider account.P
 	return loaded.([]account.RoutingCandidate), nil
 }
 
-func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, quotaMode string, now time.Time) ([]account.RoutingAccountBase, routingLayerVersion, error) {
+func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, quotaMode string, now time.Time) ([]account.RoutingAccountBase, routingLayerVersion, time.Time, error) {
 	timing := egress.PreflightTimingFromContext(ctx)
 	defer timing.Observe("base_load", timing.Start())
 	key := routingBaseCacheKey{provider: provider, quotaMode: quotaMode}
@@ -1512,9 +1524,10 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 		snapshot.lastAccess = now
 		s.routingBases[key] = snapshot
 		values := snapshot.values
+		expiresAt := snapshot.expiresAt
 		s.candidateMu.Unlock()
 		timing.Add("base_cache_hit", 1)
-		return values, version, nil
+		return values, version, expiresAt, nil
 	}
 	s.candidateMu.Unlock()
 	timing.Add("base_cache_miss", 1)
@@ -1532,8 +1545,9 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 				snapshot.lastAccess = checkTime
 				s.routingBases[key] = snapshot
 				values := snapshot.values
+				expiresAt := snapshot.expiresAt
 				s.candidateMu.Unlock()
-				return routingBaseLoadResult{values: values, version: checkVersion}, nil
+				return routingBaseLoadResult{values: values, version: checkVersion, expiresAt: expiresAt}, nil
 			}
 			if checkTime.Before(snapshot.staleUntil) {
 				stale, hasStale = snapshot, true
@@ -1552,15 +1566,16 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 				s.storeRoutingBaseSnapshotLocked(key, stale, checkTime)
 				s.candidateMu.Unlock()
 				s.logStaleRoutingFallback("base", provider, checkTime, stale.staleUntil, loadErr)
-				return routingBaseLoadResult{values: stale.values, version: checkVersion}, nil
+				return routingBaseLoadResult{values: stale.values, version: checkVersion, expiresAt: stale.expiresAt}, nil
 			}
 			return nil, loadErr
 		}
+		expiresAt := checkTime.Add(candidateCacheTTL)
 		s.candidateMu.Lock()
 		currentVersion := s.routingBaseVersionLocked(provider)
 		if currentVersion == checkVersion {
 			s.clearQuotaConsumption(provider)
-			s.storeRoutingBaseSnapshotLocked(key, routingBaseSnapshot{values: values, version: checkVersion, expiresAt: checkTime.Add(candidateCacheTTL)}, checkTime)
+			s.storeRoutingBaseSnapshotLocked(key, routingBaseSnapshot{values: values, version: checkVersion, expiresAt: expiresAt}, checkTime)
 			for accountID, cachedProvider := range s.routingAccountProvider {
 				if cachedProvider == provider {
 					delete(s.routingAccountProvider, accountID)
@@ -1571,14 +1586,14 @@ func (s *Selector) loadRoutingBases(ctx context.Context, layered repository.Rout
 			}
 		}
 		s.candidateMu.Unlock()
-		return routingBaseLoadResult{values: values, version: checkVersion}, nil
+		return routingBaseLoadResult{values: values, version: checkVersion, expiresAt: expiresAt}, nil
 	})
 	timing.Observe("base_shared_load", sharedStarted)
 	if err != nil {
-		return nil, routingLayerVersion{}, err
+		return nil, routingLayerVersion{}, time.Time{}, err
 	}
 	result := loaded.(routingBaseLoadResult)
-	return result.values, result.version, nil
+	return result.values, result.version, result.expiresAt, nil
 }
 
 func (s *Selector) loadRoutingOverlay(ctx context.Context, layered repository.RoutingLayerRepository, provider account.Provider, modelRouteID uint64, upstreamModel string, now time.Time) (account.RoutingOverlaySnapshot, routingLayerVersion, error) {
@@ -2027,7 +2042,13 @@ func (s *Selector) storeCandidateSnapshotLocked(key candidateCacheKey, snapshot 
 }
 
 func (s *Selector) storeRoutingBaseSnapshotLocked(key routingBaseCacheKey, snapshot routingBaseSnapshot, now time.Time) {
-	snapshot.lastAccess = now
+	s.storeRoutingBaseSnapshotLockedWithAccess(key, snapshot, now, now)
+}
+
+func (s *Selector) storeRoutingBaseSnapshotLockedWithAccess(key routingBaseCacheKey, snapshot routingBaseSnapshot, lastAccess, now time.Time) {
+	s.routingBaseGeneration++
+	snapshot.generation = s.routingBaseGeneration
+	snapshot.lastAccess = lastAccess
 	if snapshot.staleUntil.IsZero() {
 		snapshot.staleUntil = snapshot.expiresAt.Add(candidateCacheStaleTTL)
 	}
@@ -2049,8 +2070,9 @@ func (s *Selector) storeRoutingOverlaySnapshotLocked(key routingOverlayCacheKey,
 }
 
 type routingBaseLoadResult struct {
-	values  []account.RoutingAccountBase
-	version routingLayerVersion
+	values    []account.RoutingAccountBase
+	version   routingLayerVersion
+	expiresAt time.Time
 }
 
 type routingOverlayLoadResult struct {

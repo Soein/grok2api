@@ -87,6 +87,7 @@ type Application struct {
 	web             *webprovider.Adapter
 	egress          *infraegress.Manager
 	egressOps       *egressapp.Service
+	selector        *gateway.Selector
 	startup         *startupState
 }
 
@@ -346,6 +347,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	selector.UpdatePreferFreeBuild(cfg.Routing.PreferFreeBuild)
 	selector.UpdateSegmentedSelector(cfg.Routing.SegmentedSelectorEnabled, cfg.Routing.SegmentedMinCandidates, cfg.Routing.SegmentedWindowSize)
 	selector.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
+	selector.UpdateBuildBasePreRefreshPolicy(cfg.Routing.BuildBasePreRefreshEnabled, cfg.Routing.BuildBasePreRefreshAhead.Value(), cfg.Routing.BuildBasePreRefreshTimeout.Value())
 	accountService.UpdateExcludeBuildBotFlaggedFromScheduling(cfg.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 	egressManager.UpdateAccountIsolatedConnections(cfg.Routing.AccountIsolatedConnections)
 	invalidationService := invalidationapp.NewService(invalidationBus, invalidationSourceInstance(cfg), func(event repository.InvalidationEvent) {
@@ -422,6 +424,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		selector.UpdateConfig(next.Routing.StickyTTL.Value(), next.Routing.CooldownBase.Value(), next.Routing.CooldownMax.Value(), next.Routing.CapacityWait.Value())
 		selector.UpdatePreferFreeBuild(next.Routing.PreferFreeBuild)
 		selector.UpdateSegmentedSelector(next.Routing.SegmentedSelectorEnabled, next.Routing.SegmentedMinCandidates, next.Routing.SegmentedWindowSize)
+		selector.UpdateBuildBasePreRefreshPolicy(next.Routing.BuildBasePreRefreshEnabled, next.Routing.BuildBasePreRefreshAhead.Value(), next.Routing.BuildBasePreRefreshTimeout.Value())
 		egressService.ConfigureAutoAssignBounds(next.Routing.AutoAssignMaxNodeShare, next.Routing.AutoAssignMaxMigrationShare)
 		selector.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
 		accountService.UpdateExcludeBuildBotFlaggedFromScheduling(next.Accounts.ExcludeBuildBotFlaggedFromScheduling)
@@ -458,7 +461,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
-		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, build: cliAdapter, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
+		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, build: cliAdapter, web: webAdapter, egress: egressManager, egressOps: egressService, selector: selector, startup: startup,
 		accountRecovery: accountRecoveryService,
 	}, nil
 }
@@ -704,6 +707,9 @@ func (a *Application) Run(ctx context.Context) error {
 		a.runPeriodicTask(taskCtx, time.Minute, "egress_operations", a.egressOps.RunMaintenance)
 		return nil
 	})
+	if a.selector != nil {
+		startBackground("build_base_prerefresh", a.selector.RunBasePreRefresh)
+	}
 	if a.settingsBus != nil {
 		startBackground("settings_change_listener", func(taskCtx context.Context) error {
 			return a.settingsBus.ListenSettingsChanges(taskCtx, func(eventCtx context.Context) error {
